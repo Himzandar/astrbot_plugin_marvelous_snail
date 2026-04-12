@@ -137,6 +137,8 @@ class MarvelousSnailPlugin(Star):
                                 continue
                             article = articles[0]
                             aid = article.get("aid")
+                            title = article.get("title")
+                            digest = article.get("digest")
                             link = article.get("link")
                             if name in old_articles.keys():#是否添加过这个作者的文章
                                 old_aid = old_articles[name].get("aid")
@@ -149,12 +151,14 @@ class MarvelousSnailPlugin(Star):
                                     new_articles[name] = article
                                     logger.info(f"✅ 作者 {name} old_aid: {old_aid} aid: {aid} 发布了新文章: {article.get('title')}\n链接: {link}")
                                     await self._send_message(f"{link}")
+                                    await self._send_message(f"作者: {name}\n文章标题: {title}\n文章简介: {digest}")#因为链接可能解析不出来，所以把文章信息也发出来
                             else:   
                                 #发布了新文章
                                 updata_flag = True
                                 new_articles[name] = article
                                 logger.info(f"✅ 作者 {name} aid: {aid} 发布了新文章: {article.get('title')}\n链接: {link}")
                                 await self._send_message(f"{link}")
+                                await self._send_message(f"作者: {name}\n文章标题: {title}\n文章简介: {digest}")#因为链接可能解析不出来，所以把文章信息也发出来
                         else:
                             logger.info(f"❌ 获取{name}的文章失败: {data.get('base_resp').get('err_msg')}")
                 except Exception as e:
