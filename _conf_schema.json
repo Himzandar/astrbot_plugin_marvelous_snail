@@ -1,0 +1,20 @@
+{
+    "exporter_api_url": {
+        "description": "wechat-article-exporter API地址",
+        "type": "string",
+        "default": "https://localhost:3000",
+        "hint": "wechat-article-exporter API地址,最后不需要斜杠，例如：http://localhost:3000"
+    },
+    "exporter_auth_key": {
+        "description": "API认证密钥(auth-key)",
+        "type": "string",
+        "default": "",
+        "hint": "API认证密钥(auth-key)"
+    },
+    "updata_cron": {
+        "description": "定时查询更新的触发周期",
+        "type": "string",
+        "hint": "使用 Cron 表达式（分 时 日 月 周）定义。例如：“0 5 * * *” 表示每天 5:00 查询是否有作者更新",
+        "default": "0 5 * * *"
+    }
+}
