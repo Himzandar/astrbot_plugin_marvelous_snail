@@ -68,7 +68,7 @@ class MarvelousSnailPlugin(Star):
                         authors = await self.get_kv_data("authors",{})
                         for item in datdList:
                             name = item.get("nickname")
-                            if name in authors.keys():
+                            if name in authors.keys():  # type: ignore
                                 continue
                             fakeid = item.get("fakeid")
                             result += f"\n{index}: {name}"
@@ -90,7 +90,7 @@ class MarvelousSnailPlugin(Star):
             return
         name = data.get("name")
         fakeid = data.get("fakeid")
-        authors[name] = fakeid
+        authors[name] = fakeid  # type: ignore
         await self.put_kv_data("authors", authors)
         yield event.plain_result(f"✅ 已添加作者: {name}")
 
@@ -214,7 +214,7 @@ class MarvelousSnailPlugin(Star):
                     continue
                 umo = user_info.get("umo")
                 message_chain = MessageChain().message(message)
-                await self.context.send_message(umo, message_chain)
+                await self.context.send_message(umo, message_chain)  # type: ignore
                 logger.info(f"已发送消息给用户 {uid}: {message}")
         except Exception as e:
             logger.error(f"发送消息失败: {e}")
@@ -252,7 +252,7 @@ class MarvelousSnailPlugin(Star):
                 "umo": event.unified_msg_origin,  # 保存统一会话ID
                 "enabled": True
                 }
-            users[uid] = user_info
+            users[uid] = user_info  # type: ignore
             await self.put_kv_data("users", users)
             yield event.plain_result(f"✅ {uid} 已开启自动推送")
         else:
@@ -260,6 +260,6 @@ class MarvelousSnailPlugin(Star):
                 "umo": event.unified_msg_origin,  # 保存统一会话ID
                 "enabled": False
                 }
-            users[uid] = user_info
+            users[uid] = user_info  # type: ignore
             await self.put_kv_data("users", users)
             yield event.plain_result(f"✅ {uid} 已关闭自动推送")
