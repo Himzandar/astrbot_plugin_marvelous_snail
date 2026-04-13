@@ -448,3 +448,4 @@ class MarvelousSnailPlugin(Star):
             logger.warning("选择超时！")
         except Exception as e:
             logger.error("选择发生错误" + str(e))
+        event.stop_event()
