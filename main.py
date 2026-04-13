@@ -403,6 +403,7 @@ class MarvelousSnailPlugin(Star):
         authors = [file.stem for file in json_files]
         if not authors or len(authors) == 0:
             logger.info("没有已保存的作者和文章数据，请先添加作者并等待更新")
+            yield event.plain_result("❌ 暂无数据存储")
             return
         asyncio.create_task(
             self.parse.send_authors_selection(event=event, authors=authors)
