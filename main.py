@@ -1,5 +1,8 @@
 import asyncio
+import json
 import random
+from pathlib import Path
+from typing import Any
 
 import aiohttp
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -9,7 +12,10 @@ from astrbot.api import AstrBotConfig, logger
 from astrbot.api.event import AstrMessageEvent, MessageChain
 from astrbot.api.event.filter import command
 from astrbot.api.star import Context, Star
+from astrbot.core.utils.astrbot_path import get_astrbot_data_path
+from astrbot.core.utils.session_waiter import SessionController, session_waiter
 
+from .parse import Parse
 from .utils import cron_to_human
 
 PLUGIN_NAME = "astrbot_plugin_marvelous_snail"
@@ -25,6 +31,7 @@ class MarvelousSnailPlugin(Star):
     async def initialize(self):
         """插件初始化"""
         logger.info("最强蜗牛插件已加载")
+        self.parse = Parse()
         # await self.get_saved_account()
         self._start_auto_updata_job()
         if not self.scheduler.running:
@@ -162,7 +169,7 @@ class MarvelousSnailPlugin(Star):
         new_articles = {}
         updata_flag = False
         for name, fakeid in authors.items():
-            logger.info(f"正在获取作者 {name} 的文章列表...")
+            logger.debug(f"正在获取作者 {name} 的文章列表...")
             async with aiohttp.ClientSession() as session:
                 headers = {"X-Auth-Key": self.config.get("exporter_auth_key")}
                 params = {"fakeid": fakeid, "size": 1}
@@ -179,7 +186,7 @@ class MarvelousSnailPlugin(Star):
                                 # 处理成功响应
                                 articles = data.get("articles")  # 设置了只获取1条文章
                                 if articles is None or len(articles) == 0:
-                                    logger.info(f"❌ 作者 {name} 没有文章")
+                                    logger.debug(f"❌ 作者 {name} 没有文章")
                                     continue
                                 article = articles[0]
                                 aid = article.get("aid")
@@ -191,14 +198,15 @@ class MarvelousSnailPlugin(Star):
                                 ):  # 是否添加过这个作者的文章
                                     old_aid = old_articles[name].get("aid")
                                     if old_aid == aid:
-                                        logger.info(f"✅ 作者 {name} 未更新")
+                                        logger.debug(f"✅ 作者 {name} 未更新")
                                         new_articles[name] = old_articles[name]  # type: ignore
                                         continue
                                     else:
                                         # 发布了新文章
                                         updata_flag = True
                                         new_articles[name] = article
-                                        logger.info(
+                                        await self.save_config(name, article)
+                                        logger.debug(
                                             f"✅ 作者 {name} old_aid: {old_aid} aid: {aid} 发布了新文章: {article.get('title')}\n链接: {link}"
                                         )
                                         await self._send_message(f"{link}")
@@ -209,7 +217,8 @@ class MarvelousSnailPlugin(Star):
                                     # 发布了新文章
                                     updata_flag = True
                                     new_articles[name] = article
-                                    logger.info(
+                                    await self.save_config(name, article)
+                                    logger.debug(
                                         f"✅ 作者 {name} aid: {aid} 发布了新文章: {article.get('title')}\n链接: {link}"
                                     )
                                     await self._send_message(f"{link}")
@@ -218,7 +227,7 @@ class MarvelousSnailPlugin(Star):
                                     )  # 因为链接可能解析不出来，所以把文章信息也发出来
                             else:
                                 # 处理失败响应
-                                logger.info(
+                                logger.debug(
                                     f"❌ 获取{name}的文章失败: {data.get('base_resp').get('err_msg')}"
                                 )
                         except (ValueError, KeyError) as e:
@@ -229,10 +238,10 @@ class MarvelousSnailPlugin(Star):
             base_delay = 6
             random_factor = random.uniform(-5, 5)
             delay = max(5, base_delay + random_factor)  # 确保间隔至少为5秒
-            logger.info(f"等待 {delay:.2f} 秒后继续获取下一个作者的文章...")
+            logger.debug(f"等待 {delay:.2f} 秒后继续获取下一个作者的文章...")
             await asyncio.sleep(delay)
         if not updata_flag:
-            logger.info("没有新的文章更新")
+            logger.debug("没有新的文章更新")
         else:
             await self.put_kv_data("articles", new_articles)
 
@@ -342,3 +351,99 @@ class MarvelousSnailPlugin(Star):
             users[uid] = user_info  # type: ignore
             await self.put_kv_data("users", users)
             yield event.plain_result(f"✅ {uid} 已关闭自动推送")
+
+    async def save_config(self,authors: str, write_data: Any)-> None:
+        """保存数据到本地 JSON 文件，按作者分类保存"""
+        # 1. 获取字符串路径，并显式转换为 Path 对象
+        data_dir_str = get_astrbot_data_path()
+        plugin_data_path = Path(data_dir_str) / "plugin_data" / self.name
+
+        # 2. 创建目录 (此时 plugin_data_path 是 Path 对象，所以 .mkdir() 可用)
+        plugin_data_path.mkdir(parents=True, exist_ok=True)
+        # 3.尝试读取文件
+        authors_file = plugin_data_path / f"{authors}.json"
+        if authors_file.exists():
+            try:
+                with authors_file.open("r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    #获取数据数量
+                    num = data.get("num", 0)
+                    articles = data.get("articles", [])
+                    #根据时间戳排序articles
+                    # articles.sort(key=lambda x: x.get("update_time", 0), reverse=True)
+                    #头插
+                    articles.insert(0, write_data)
+                    num += 1
+                    data = {
+                        "num": num,
+                        "articles": articles
+                    }
+            except Exception as e:
+                logger.error(f"读取 {authors}.json 失败: {e}")
+        else:
+            data = {
+                "num": 1,
+                "articles": [write_data]
+            }
+        # 4.尝试写入文件
+        try:
+            with authors_file.open("w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=4)
+        except Exception as e:
+            logger.error(f"写入 {authors}.json 失败: {e}")
+
+    @command("最新攻略zqwn")
+    async def get_articles(self, event: AstrMessageEvent):
+        """获取已保存的文章列表，选择后发送文章详情"""
+        data_dir_str = get_astrbot_data_path()
+        plugin_data_path = Path(data_dir_str) / "plugin_data" / self.name
+        #获取目录下的所有json文件名
+        json_files = list(plugin_data_path.glob("*.json"))
+        #去掉扩展名后的文件名作为作者列表
+        authors = [file.stem for file in json_files]
+        if not authors:
+            logger.debug("没有已保存的作者和文章数据，请先添加作者并等待更新")
+            return
+        asyncio.create_task(
+            self.parse.send_authors_selection(event=event, authors=authors)
+        )
+
+        @session_waiter(timeout=10)
+        async def empty_mention_waiter(
+            controller: SessionController, event: AstrMessageEvent
+        ):
+            arg = event.message_str.strip()
+            parts = arg.split()
+            index = 0
+            # 解析输入格式
+            if len(parts) == 1 and parts[0].isdigit():
+                index = int(parts[0])
+            if index == 0:
+                return
+            if index < 1 or index > len(authors):
+                controller.stop()
+                return
+            selected_author = authors[index - 1]+".json"
+            # 读取作者对应的文章数据
+            try:
+                with open(plugin_data_path / selected_author, encoding="utf-8") as f:
+                    author_data = json.load(f)
+            except Exception as e:
+                logger.error(f"读取 {selected_author} 失败: {e}")
+                controller.stop()
+                return
+            # 获取最新的一篇文章
+            articles = author_data.get("articles", [])
+            if not articles:
+                logger.debug(f"作者 {selected_author} 没有文章数据")
+                controller.stop()
+                return
+            new_article: dict = articles[0]
+            await self.parse.send_article_details(event, new_article)
+            controller.stop()
+        try:
+            await empty_mention_waiter(event)
+        except TimeoutError as _:
+            logger.warning("选择超时！")
+        except Exception as e:
+            logger.error("选择发生错误" + str(e))
