@@ -401,8 +401,8 @@ class MarvelousSnailPlugin(Star):
         json_files = list(plugin_data_path.glob("*.json"))
         #去掉扩展名后的文件名作为作者列表
         authors = [file.stem for file in json_files]
-        if not authors:
-            logger.debug("没有已保存的作者和文章数据，请先添加作者并等待更新")
+        if not authors or len(authors) == 0:
+            logger.info("没有已保存的作者和文章数据，请先添加作者并等待更新")
             return
         asyncio.create_task(
             self.parse.send_authors_selection(event=event, authors=authors)
