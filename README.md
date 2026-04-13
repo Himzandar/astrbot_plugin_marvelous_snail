@@ -1,3 +1,4 @@
+![:name](https://count.getloli.com/@astrbot_plugin_marvelous_snail?name=astrbot_plugin_marvelous_snail&theme=minecraft&padding=6&offset=0&align=top&scale=1&pixelated=1&darkmode=auto)	
 # 最强蜗牛插件
 
 `astrbot_plugin_marvelous_snail` 目前功能是一个用于监控微信公众号 **最强蜗牛** 文章更新并自动推送到指定会话的 AstrBot 插件。通过配置第三方公众号文章导出 API，插件可以定期检测指定公众号作者是否发布了新文章，并及时通过私聊或群聊通知用户。
