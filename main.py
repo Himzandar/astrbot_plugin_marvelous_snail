@@ -449,3 +449,78 @@ class MarvelousSnailPlugin(Star):
         except Exception as e:
             logger.error("选择发生错误" + str(e))
         event.stop_event()
+
+
+
+
+
+    # @command("get")#测试接口
+    async def get_(self,event: AstrMessageEvent,author_in:str):
+        authors = await self.get_kv_data("authors", {})#这个是用来获取fakeid
+        write_data = []
+        fakeid = authors.get(author_in,"") # type: ignore
+        logger.info(f"正在获取作者 {author_in} fakeid 为 {fakeid} 的文章列表...")
+        begin = 0 # 起始索引
+        num = 0 #记录有效文章数量
+        while True:
+            async with aiohttp.ClientSession() as session:
+                headers = {"X-Auth-Key": self.config.get("exporter_auth_key")}
+                params = {"fakeid": fakeid,"begin": begin,"size": 20}
+                try:
+                    async with session.get(
+                        f"{self.config.get('exporter_api_url')}/api/public/v1/article",
+                        headers=headers,
+                        params=params,
+                    ) as resp:
+                        try:
+                            data = await resp.json()
+                            base_resp = data.get("base_resp")
+                            if base_resp and base_resp.get("err_msg") == "ok":
+                                # 处理成功响应
+                                articles = data.get("articles")
+                                logger.info(f"第{begin} 获取到 {len(articles) if articles else 0} 篇文章")
+                                if articles is None or len(articles) == 0:
+                                    break
+                                for article in articles:
+                                    is_deleted = article.get("is_deleted",False)
+                                    if is_deleted:#如果文章被删除了，就不保存
+                                        continue
+                                    write_data.append(article)# 保存
+                                    num+=1
+                            else:
+                                # 处理失败响应
+                                logger.error(
+                                    f"❌ 获取{author_in}的文章失败: {data.get('base_resp').get('err_msg')}"
+                                )
+                            begin += 20
+                        except (ValueError, KeyError):
+                            logger.error("API 响应解析失败")
+                            break
+                except Exception:
+                    logger.error("获取公众号文章失败")
+                    break
+            logger.debug(f"第{begin}请求，已获取 {num} 篇有效文章")
+            #休眠防止请求过快被封IP，间隔随机3-5秒
+            random_factor = random.uniform(3, 5)
+            delay = max(5, random_factor)  # 确保间隔至少为5秒
+            await asyncio.sleep(delay)
+        logger.info(f"共获取到 {num} 篇有效文章")
+
+        #保存数据到本地JSON文件
+        # 1. 获取字符串路径，并显式转换为 Path 对象
+        data_dir_str = get_astrbot_data_path()
+        plugin_data_path = Path(data_dir_str) / "plugin_data" / self.name
+
+        # 2. 创建目录 (此时 plugin_data_path 是 Path 对象，所以 .mkdir() 可用)
+        plugin_data_path.mkdir(parents=True, exist_ok=True)
+        authors_file = plugin_data_path / f"{author_in}.json"
+        data = {
+            "num": num,
+            "articles": write_data
+        }
+        # 3.尝试写入文件
+        try:
+            with authors_file.open("w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=4)
+        except Exception as e:
+            logger.error(f"写入 {author_in}.json 失败: {e}")
