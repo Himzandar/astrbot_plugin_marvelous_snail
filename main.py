@@ -10,13 +10,13 @@ from apscheduler.triggers.cron import CronTrigger
 
 from astrbot.api import AstrBotConfig, logger
 from astrbot.api.event import AstrMessageEvent, MessageChain
-from astrbot.api.event.filter import command,llm_tool
+from astrbot.api.event.filter import command
 from astrbot.api.star import Context, Star
-from astrbot.core.utils.astrbot_path import get_astrbot_data_path
-from astrbot.core.utils.session_waiter import SessionController, session_waiter
 from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event import (
     AiocqhttpMessageEvent,
 )
+from astrbot.core.utils.astrbot_path import get_astrbot_data_path
+from astrbot.core.utils.session_waiter import SessionController, session_waiter
 
 from .parse import Parse
 from .utils import cron_to_human, send_msg
@@ -450,16 +450,24 @@ class MarvelousSnailPlugin(Star):
         formatted_authors.insert(0, "需要获取谁的文章详情？请回复编号选择：")
         msg = "\n".join(formatted_authors)
         message_id = await send_msg(event, msg)
+        #如果是群聊记录用户ID
+        group_id = getattr(event.message_obj, "group_id", None)
+        user_id = None
+        if group_id and group_id != 0:
+            user_id = event.get_sender_id()
         @session_waiter(timeout=20)
         async def articles_waiter(
             controller: SessionController, event: AstrMessageEvent
         ):
             nonlocal user_stage, selected_author, pages_msg, pages_data, message_id,page_id
-            
+            now_user_id = event.get_sender_id()
+            if user_id and now_user_id != user_id:
+                return
             if isinstance(event, AiocqhttpMessageEvent):#判断aiocqhttp平台
                 if message_id:
                     await event.bot.delete_msg(message_id=message_id)#用户响应撤回消息
                     message_id = None
+
             if user_stage == "select_author":
                 arg = event.message_str.strip()
                 parts = arg.split()
@@ -468,8 +476,6 @@ class MarvelousSnailPlugin(Star):
                 if len(parts) == 1 and parts[0].isdigit():
                     index = int(parts[0])
                 if index < 1 or index > len(authors):
-                    await event.send(event.plain_result("❌ 无效编号,终止运行"))
-                    controller.stop()
                     return
                 selected_author = authors[index - 1]
                 # 解析作者的文章数据
@@ -490,12 +496,8 @@ class MarvelousSnailPlugin(Star):
                 if len(parts) == 1 and parts[0].isdigit():
                     select_article_id = int(parts[0])
                 else:
-                    await event.send(event.plain_result("❌ 输入非数字，终止运行"))
-                    controller.stop()
                     return
                 if select_article_id < 1 or select_article_id > len(pages_data[page_id]):
-                    await event.send(event.plain_result("❌ 无效编号,终止运行"))
-                    controller.stop()
                     return
                 if select_article_id in pages_data[page_id]:
                     selected = pages_data[page_id][select_article_id]
@@ -511,14 +513,13 @@ class MarvelousSnailPlugin(Star):
                         controller.stop()
                         return
                 else:
-                    await event.send(event.plain_result("无效编号，终止运行"))
-                    controller.stop()
                     return
                 controller.keep(timeout=20, reset_timeout=True)#重置超时时间，等待用户选择文章
         try:
             await articles_waiter(event)
         except TimeoutError as _:
             logger.warning("选择超时！")
+            await event.send(event.plain_result("❌ 选择超时，终止运行"))
         except Exception as e:
             logger.error("选择发生错误" + str(e))
         event.stop_event()
@@ -604,7 +605,7 @@ class MarvelousSnailPlugin(Star):
             logger.error(f"写入 {author_in}.json 失败: {e}")
 
     # ==================== LLM 工具 ====================
- 
+
     # @llm_tool(name="search_strategy")
     # async def search_strategy(
     #     self,

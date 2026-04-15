@@ -1,9 +1,10 @@
 # utils.py
 
-from astrbot.api.event import AstrMessageEvent, MessageChain
+from astrbot.api.event import AstrMessageEvent
 from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event import (
     AiocqhttpMessageEvent,
 )
+
 
 def cron_to_human(cron: str) -> str:
     """将 5 段 cron（分 时 日 月 周）转换为中文易读描述

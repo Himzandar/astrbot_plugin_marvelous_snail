@@ -1,16 +1,9 @@
-import asyncio
 import json
 from pathlib import Path
 
 import jieba
 
 from astrbot.api import logger
-from astrbot.api.event import AstrMessageEvent
-from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event import (
-    AiocqhttpMessageEvent,
-)
-
-from .utils import send_msg
 
 
 class Parse:
@@ -98,11 +91,11 @@ class Parse:
             msg = f"{author} 没有{parse_str}相关的攻略"
             return {"msg": msg, "data": {}}
         ret["msg"] = f"{author}:{parse_str}相关攻略，共{len(data)}条，请回复编号选择："
-        
+
         for title, link, score in data:
             ret["data"][title] = link
         return ret
-    
+
     async def Paging_strategies(self, strategies: dict, page_size: int = 5):
         """分页攻略列表
         Args:
