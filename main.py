@@ -10,13 +10,16 @@ from apscheduler.triggers.cron import CronTrigger
 
 from astrbot.api import AstrBotConfig, logger
 from astrbot.api.event import AstrMessageEvent, MessageChain
-from astrbot.api.event.filter import command
+from astrbot.api.event.filter import command,llm_tool
 from astrbot.api.star import Context, Star
 from astrbot.core.utils.astrbot_path import get_astrbot_data_path
 from astrbot.core.utils.session_waiter import SessionController, session_waiter
+from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event import (
+    AiocqhttpMessageEvent,
+)
 
 from .parse import Parse
-from .utils import cron_to_human
+from .utils import cron_to_human, send_msg
 
 PLUGIN_NAME = "astrbot_plugin_marvelous_snail"
 
@@ -61,7 +64,11 @@ class MarvelousSnailPlugin(Star):
     async def search_public_account(
         self, event: AstrMessageEvent, keyword: str = "最强蜗牛", size: int = 5
     ):
-        """搜索公众号作者，默认搜索“最强蜗牛”，返回前5个结果"""
+        """搜索公众号作者，默认搜索“最强蜗牛”，返回前5个结果
+        Args:
+            keyword: 搜索关键词，默认为“最强蜗牛”
+            size: 返回结果数量，默认为5
+        """
         if not self._check_config():
             yield event.plain_result("❌ 插件未配置 API 地址或密钥，请联系管理员")
             return
@@ -109,7 +116,10 @@ class MarvelousSnailPlugin(Star):
 
     @command("zqwn_add")
     async def add_saved_account(self, event: AstrMessageEvent, index: str):
-        """将搜索结果中指定索引的公众号作者添加到保存列表"""
+        """将搜索结果中指定索引的公众号作者添加到保存列表
+        Args:
+            index: 搜索结果中的索引
+        """
         authors = await self.get_kv_data("authors", {})
         try:
             data = self.authors.get(int(index))
@@ -127,7 +137,10 @@ class MarvelousSnailPlugin(Star):
 
     @command("zqwn_del")
     async def del_saved_account(self, event: AstrMessageEvent, name: str):
-        """从保存列表中删除指定名字的公众号作者"""
+        """从保存列表中删除指定名字的公众号作者
+        Args:
+            name: 作者名称
+        """
         authors = await self.get_kv_data("authors", {})
         articles = await self.get_kv_data("articles", {})
         if name not in authors.keys():  # type: ignore
@@ -146,7 +159,8 @@ class MarvelousSnailPlugin(Star):
 
     @command("zqwn_list")
     async def list_saved_accounts(self, event: AstrMessageEvent):
-        """列出已保存的公众号作者"""
+        """列出已保存的公众号作者
+        """
         authors = await self.get_kv_data("authors", {})
         if not authors or len(authors) == 0:
             yield event.plain_result("❌ 请先使用 zqwn 命令搜索公众号作者")
@@ -159,7 +173,8 @@ class MarvelousSnailPlugin(Star):
         yield event.plain_result(result)
 
     async def get_saved_account(self):
-        """获取已保存的公众号作者的最新文章"""
+        """获取已保存的公众号作者的最新文章
+        """
         authors = await self.get_kv_data("authors", {})
         if not authors or len(authors) == 0:
             return
@@ -246,7 +261,8 @@ class MarvelousSnailPlugin(Star):
             await self.put_kv_data("articles", new_articles)
 
     def _start_auto_updata_job(self):
-        """根据配置的 Cron 表达式设置监控任务"""
+        """根据配置的 Cron 表达式设置监控任务
+        Cron 表达式示例：0 0 * * *（每天凌晨0点执行）"""
         scheduler = self.scheduler
         if scheduler is None:
             logger.error("Scheduler 未初始化")
@@ -283,7 +299,10 @@ class MarvelousSnailPlugin(Star):
             logger.error(f"添加任务失败：{e}")
 
     async def _send_message(self, message: str):
-        """发送消息"""
+        """发送消息
+        Args:
+            message: 要发送的消息内容
+        """
         try:
             users = await self.get_kv_data("users", {})
             if not users or len(users) == 0:
@@ -307,7 +326,8 @@ class MarvelousSnailPlugin(Star):
 
     @command("获取推送列表")
     async def get_push_list(self, event: AstrMessageEvent):
-        """获取推送列表"""
+        """获取推送列表
+        """
         users = await self.get_kv_data("users", {})
         if not users or len(users) == 0:
             yield event.plain_result("❌ 未配置推送用户")
@@ -323,7 +343,10 @@ class MarvelousSnailPlugin(Star):
 
     @command("推送zqwn")
     async def push_zqwn(self, event: AstrMessageEvent, enabled: str):
-        """设置推送列表/开启或关闭推送"""
+        """设置推送列表/开启或关闭推送
+        Args:
+            enabled: "开启" 或 "关闭"
+        """
         group_id = getattr(event.message_obj, "group_id", None)
         user_name = event.get_sender_name()
         uid = group_id
@@ -353,7 +376,11 @@ class MarvelousSnailPlugin(Star):
             yield event.plain_result(f"✅ {uid} 已关闭自动推送")
 
     async def save_config(self,authors: str, write_data: Any)-> None:
-        """保存数据到本地 JSON 文件，按作者分类保存"""
+        """保存数据到本地 JSON 文件，按作者分类保存
+        Args:
+            authors: 作者名称
+            write_data: 要保存的数据
+        """
         # 1. 获取字符串路径，并显式转换为 Path 对象
         data_dir_str = get_astrbot_data_path()
         plugin_data_path = Path(data_dir_str) / "plugin_data" / self.name
@@ -392,9 +419,17 @@ class MarvelousSnailPlugin(Star):
         except Exception as e:
             logger.error(f"写入 {authors}.json 失败: {e}")
 
-    @command("最新攻略zqwn")
-    async def get_articles(self, event: AstrMessageEvent):
-        """获取已保存的文章列表，选择后发送文章详情"""
+    @command("搜索攻略")
+    async def get_strategy(self, event: AstrMessageEvent,parse_str: str):
+        """获取已保存的文章列表，选择后发送文章详情
+        Args:
+            parse_str: 搜索关键词
+        """
+        user_stage = "select_author"
+        selected_author = None
+        pages_msg, pages_data = [], []
+        message_id = None
+        page_id = 0
         data_dir_str = get_astrbot_data_path()
         plugin_data_path = Path(data_dir_str) / "plugin_data" / self.name
         #获取目录下的所有json文件名
@@ -403,47 +438,85 @@ class MarvelousSnailPlugin(Star):
         authors = [file.stem for file in json_files]
         if not authors or len(authors) == 0:
             logger.info("没有已保存的作者和文章数据，请先添加作者并等待更新")
-            yield event.plain_result("❌ 暂无数据存储")
+            await event.send(event.plain_result("❌ 暂无数据存储"))
             return
-        asyncio.create_task(
-            self.parse.send_authors_selection(event=event, authors=authors)
-        )
-
-        @session_waiter(timeout=10)
-        async def empty_mention_waiter(
+        # asyncio.create_task(
+        #     self.parse.send_authors_selection(event=event, authors=authors)
+        # )
+        formatted_authors = [
+            f"{index + 1}. {author}"
+            for index, author in enumerate(authors)
+        ]
+        formatted_authors.insert(0, "需要获取谁的文章详情？请回复编号选择：")
+        msg = "\n".join(formatted_authors)
+        message_id = await send_msg(event, msg)
+        @session_waiter(timeout=20)
+        async def articles_waiter(
             controller: SessionController, event: AstrMessageEvent
         ):
-            arg = event.message_str.strip()
-            parts = arg.split()
-            index = 0
-            # 解析输入格式
-            if len(parts) == 1 and parts[0].isdigit():
-                index = int(parts[0])
-            if index == 0:
-                return
-            if index < 1 or index > len(authors):
-                controller.stop()
-                return
-            selected_author = authors[index - 1]+".json"
-            # 读取作者对应的文章数据
-            try:
-                with open(plugin_data_path / selected_author, encoding="utf-8") as f:
-                    author_data = json.load(f)
-            except Exception as e:
-                logger.error(f"读取 {selected_author} 失败: {e}")
-                controller.stop()
-                return
-            # 获取最新的一篇文章
-            articles = author_data.get("articles", [])
-            if not articles:
-                logger.debug(f"作者 {selected_author} 没有文章数据")
-                controller.stop()
-                return
-            new_article: dict = articles[0]
-            await self.parse.send_article_details(event, new_article)
-            controller.stop()
+            nonlocal user_stage, selected_author, pages_msg, pages_data, message_id,page_id
+            
+            if isinstance(event, AiocqhttpMessageEvent):#判断aiocqhttp平台
+                if message_id:
+                    await event.bot.delete_msg(message_id=message_id)#用户响应撤回消息
+                    message_id = None
+            if user_stage == "select_author":
+                arg = event.message_str.strip()
+                parts = arg.split()
+                index = 0
+                # 解析输入格式
+                if len(parts) == 1 and parts[0].isdigit():
+                    index = int(parts[0])
+                if index < 1 or index > len(authors):
+                    await event.send(event.plain_result("❌ 无效编号,终止运行"))
+                    controller.stop()
+                    return
+                selected_author = authors[index - 1]
+                # 解析作者的文章数据
+                result = await self.parse.parse_title_send_link(plugin_data_path, selected_author, parse_str)
+                if result is None or len(result) == 0:
+                    await event.send(event.plain_result(f"❌ 作者 {selected_author} 没有文章数据"))
+                    controller.stop()
+                    return
+                user_stage = "select_article"
+                pages_msg, pages_data = await self.parse.Paging_strategies(result["data"], 5)
+                #发送第一页攻略列表
+                message_id = await send_msg(event, pages_msg[page_id])
+                controller.keep(timeout=20, reset_timeout=True)#重置超时时间，等待用户选择文章
+            elif user_stage == "select_article":
+                arg = event.message_str.strip()
+                parts = arg.split()
+                select_article_id = 0
+                if len(parts) == 1 and parts[0].isdigit():
+                    select_article_id = int(parts[0])
+                else:
+                    await event.send(event.plain_result("❌ 输入非数字，终止运行"))
+                    controller.stop()
+                    return
+                if select_article_id < 1 or select_article_id > len(pages_data[page_id]):
+                    await event.send(event.plain_result("❌ 无效编号,终止运行"))
+                    controller.stop()
+                    return
+                if select_article_id in pages_data[page_id]:
+                    selected = pages_data[page_id][select_article_id]
+                    if selected == "上一页":
+                        page_id = max(0, page_id - 1)
+                        message_id = await send_msg(event, pages_msg[page_id])
+                    elif selected == "下一页":
+                        page_id = min(len(pages_msg) - 1, page_id + 1)
+                        message_id = await send_msg(event, pages_msg[page_id])
+                    else:
+                        title,link = selected
+                        await event.send(event.plain_result(link))
+                        controller.stop()
+                        return
+                else:
+                    await event.send(event.plain_result("无效编号，终止运行"))
+                    controller.stop()
+                    return
+                controller.keep(timeout=20, reset_timeout=True)#重置超时时间，等待用户选择文章
         try:
-            await empty_mention_waiter(event)
+            await articles_waiter(event)
         except TimeoutError as _:
             logger.warning("选择超时！")
         except Exception as e:
@@ -454,8 +527,13 @@ class MarvelousSnailPlugin(Star):
 
 
 
-    # @command("get")#测试接口
+    # @command("get")
     async def get_(self,event: AstrMessageEvent,author_in:str):
+        """获取指定作者的所有文章并保存到本地 JSON 文件,需要管理员权限
+        Args:
+            event: 消息事件对象
+            author_in: 作者名称
+        """
         authors = await self.get_kv_data("authors", {})#这个是用来获取fakeid
         write_data = []
         fakeid = authors.get(author_in,"") # type: ignore
@@ -524,3 +602,18 @@ class MarvelousSnailPlugin(Star):
                 json.dump(data, f, ensure_ascii=False, indent=4)
         except Exception as e:
             logger.error(f"写入 {author_in}.json 失败: {e}")
+
+    # ==================== LLM 工具 ====================
+ 
+    # @llm_tool(name="search_strategy")
+    # async def search_strategy(
+    #     self,
+    #     event: AstrMessageEvent,
+    #     parse_str: str,
+    # ):
+    #     """将你分析得到的提示词作为参数调用 get_strategy 方法，后续由get_strategy流程接管运行即可
+    #     Args:
+    #         parse_str(string): 搜索提示词,例如: "搜索最强蜗牛源兽攻略"中的"源兽"
+    #     """
+    #     await self.get_strategy(event, parse_str=parse_str)
+    #     return "OK. The strategy workflow has been executed. Please do not generate any further text response."

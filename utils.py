@@ -1,9 +1,16 @@
 # utils.py
 
+from astrbot.api.event import AstrMessageEvent, MessageChain
+from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event import (
+    AiocqhttpMessageEvent,
+)
 
 def cron_to_human(cron: str) -> str:
-    """
-    将 5 段 cron（分 时 日 月 周）转换为中文易读描述
+    """将 5 段 cron（分 时 日 月 周）转换为中文易读描述
+    Args:
+        cron: 5 段 cron 表达式
+    Returns:
+        中文易读描述字符串
     """
     parts = cron.strip().split()
     if len(parts) != 5:
@@ -66,3 +73,26 @@ def cron_to_human(cron: str) -> str:
         desc.append(" ".join(time_desc))
 
     return " ".join(desc)
+
+async def send_msg(event: AstrMessageEvent, msg: str) -> int | None:
+    """发送消息并返回消息ID
+    Args:
+        event: 消息事件对象
+        msg: 要发送的消息内容
+    Returns:
+        发送平台如果不是 Aiocqhttp 则返回 None，如果是 Aiocqhttp 且发送失败则返回 None ，否则返回消息ID
+    """
+    if isinstance(event, AiocqhttpMessageEvent):
+        payloads: dict = {"message": [{"type": "text", "data": {"text": msg}}]}
+        if event.is_private_chat():
+            payloads["user_id"] = event.get_sender_id()
+            result = await event.bot.api.call_action("send_private_msg", **payloads)
+        else:
+            payloads["group_id"] = event.get_group_id()
+            result = await event.bot.api.call_action("send_group_msg", **payloads)
+        return result.get("message_id")
+    else:
+        await event.send(event.plain_result(msg))
+        return None
+
+
