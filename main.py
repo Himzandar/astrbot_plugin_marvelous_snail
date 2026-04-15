@@ -463,6 +463,11 @@ class MarvelousSnailPlugin(Star):
             now_user_id = event.get_sender_id()
             if user_id and now_user_id != user_id:
                 return
+            #可能获取的是正在输入情况，不撤回，不进行后续流程
+            arg = event.message_str.strip()
+            parts = arg.split()
+            if len(parts) == 0:
+                return
             if isinstance(event, AiocqhttpMessageEvent):#判断aiocqhttp平台
                 if message_id:
                     await event.bot.delete_msg(message_id=message_id)#用户响应撤回消息
