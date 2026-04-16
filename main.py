@@ -208,6 +208,9 @@ class MarvelousSnailPlugin(Star):
                                 title = article.get("title")
                                 digest = article.get("digest")
                                 link = article.get("link")
+                                author_name = article.get("author_name")
+                                if author_name != "广告":#如果是广告，就不保存了
+                                    continue
                                 if (
                                     name in old_articles.keys()
                                 ):  # 是否添加过这个作者的文章
