@@ -1,6 +1,7 @@
 import asyncio
 import json
 import random
+import time
 from pathlib import Path
 from typing import Any
 
@@ -10,7 +11,7 @@ from apscheduler.triggers.cron import CronTrigger
 
 from astrbot.api import AstrBotConfig, logger
 from astrbot.api.event import AstrMessageEvent, MessageChain
-from astrbot.api.event.filter import command
+from astrbot.api.event.filter import EventMessageType, command, event_message_type
 from astrbot.api.star import Context, Star
 from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event import (
     AiocqhttpMessageEvent,
@@ -18,6 +19,7 @@ from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event import (
 from astrbot.core.utils.astrbot_path import get_astrbot_data_path
 from astrbot.core.utils.session_waiter import SessionController, session_waiter
 
+from .code import parse_code
 from .parse import Parse
 from .utils import cron_to_human, send_msg
 
@@ -227,10 +229,17 @@ class MarvelousSnailPlugin(Star):
                                         logger.debug(
                                             f"✅ 作者 {name} old_aid: {old_aid} aid: {aid} 发布了新文章: {article.get('title')}\n链接: {link}"
                                         )
-                                        await self._send_message(f"{link}")
-                                        await self._send_message(
-                                            f"作者: {name}\n文章标题: {title}\n文章简介: {digest}"
-                                        )  # 因为链接可能解析不出来，所以把文章信息也发出来
+                                        await self._send_message(f"作者: {name}\n文章标题: {title}\n文章简介: {digest}\n链接: {link}")
+                                        if name == "最强蜗牛":
+                                            # 如果是最强蜗牛的文章，解析密令并发送
+                                            code_info = await self.get_code(link)
+                                            code = code_info.get("code")
+                                            if code and len(code) > 0:
+                                                send_txt = f"密令:{code}"
+                                                if code_info.get("share"):
+                                                    send_txt += f"\n{digest}"
+                                                    self.write_codes(digest.split("密令：")[-1])
+                                                await self._send_message(send_txt)
                                 else:
                                     # 发布了新文章
                                     updata_flag = True
@@ -239,10 +248,17 @@ class MarvelousSnailPlugin(Star):
                                     logger.debug(
                                         f"✅ 作者 {name} aid: {aid} 发布了新文章: {article.get('title')}\n链接: {link}"
                                     )
-                                    await self._send_message(f"{link}")
-                                    await self._send_message(
-                                        f"作者: {name}\n文章标题: {title}\n文章简介: {digest}"
-                                    )  # 因为链接可能解析不出来，所以把文章信息也发出来
+                                    await self._send_message(f"作者: {name}\n文章标题: {title}\n文章简介: {digest}\n链接: {link}")
+                                    if name == "最强蜗牛":
+                                        # 如果是最强蜗牛的文章，解析密令并发送
+                                        code_info = await self.get_code(link)
+                                        code = code_info.get("code")
+                                        if code and len(code) > 0:
+                                            send_txt = f"密令:{code}"
+                                            if code_info.get("share"):
+                                                send_txt += f"\n{digest}"
+                                                self.write_codes(digest.split("密令：")[-1])
+                                            await self._send_message(send_txt)
                             else:
                                 # 处理失败响应
                                 logger.debug(
@@ -612,6 +628,152 @@ class MarvelousSnailPlugin(Star):
         except Exception as e:
             logger.error(f"写入 {author_in}.json 失败: {e}")
 
+
+    async def get_code(self,link: str):
+        """解析密令
+        Args:
+            link: 文章链接
+        """
+        ret = {
+            "code": "",
+            "share": False
+        }
+        exporter_api_url = self.config.get("exporter_api_url")
+        parse_code_result = await parse_code(exporter_api_url, link)
+        if parse_code_result.get("msg") == "解析成功":
+            code = parse_code_result["code"]
+            ret["code"] = code
+            self.write_codes(code)
+            logger.info(f"解析密令成功: {code}")
+            #判断是否存在share
+            if parse_code_result["share"]:
+                ret["share"] = True
+            return ret
+        else:
+            self.write_code_error(link)
+            logger.info(f"解析密令失败: {parse_code_result.get('msg')},链接: {link}")
+        return ret
+
+    def write_codes(self, code: str):
+        """将解析得到的密令写入本地 JSON 文件
+        Args:
+            code: 解析得到的密令
+        """
+        data = {
+            "num": 0,
+            "code": {}
+        }
+        # 1. 获取字符串路径，并显式转换为 Path 对象
+        data_dir_str = get_astrbot_data_path()
+        plugin_data_path = Path(data_dir_str) / "plugin_data" / self.name
+        # 2. 尝试创建目录 (此时 plugin_data_path 是 Path 对象，所以 .mkdir() 可用)，如果目录已存在则不会报错
+        codes_dir = plugin_data_path / "codes"
+        codes_dir.mkdir(parents=True, exist_ok=True)
+        codes_file = codes_dir / "codes.json"
+        #读取原有的密令数据
+        codes = {}
+        if codes_file.exists():
+            try:
+                with codes_file.open("r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    codes = data.get("code", {})
+            except Exception as e:
+                logger.error(f"读取原有密令数据失败: {e}")
+        #获取当前时间戳,转换为月份格式，作为密令的值
+        timestamp = int(time.time())
+        month_str = time.strftime("%Y-%m", time.localtime(timestamp))
+        codes[code] = month_str
+        #删除过期的密令
+        codes = self.delete_past_code(codes)
+        data["code"] = codes
+        data["num"] = len(codes)
+        try:
+            with codes_file.open("w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=4)
+            logger.info(f"已将密令写入 {codes_file}")
+        except Exception as e:
+            logger.error(f"写入密令失败: {e}")
+
+    def write_code_error(self, link: str):
+        """将解析失败的链接写入本地 JSON 文件
+        Args:
+            link: 解析失败的链接
+        """
+        data = {"urls": []}
+        # 1. 获取字符串路径，并显式转换为 Path 对象
+        data_dir_str = get_astrbot_data_path()
+        plugin_data_path = Path(data_dir_str) / "plugin_data" / self.name
+        # 2. 尝试创建目录 (此时 plugin_data_path 是 Path 对象，所以 .mkdir() 可用)，如果目录已存在则不会报错
+        codes_dir = plugin_data_path / "codes"
+        codes_dir.mkdir(parents=True, exist_ok=True)
+        code_error_file = codes_dir / "code_error.json"
+        #读取原有的解析失败链接数据
+        urls = []
+        if code_error_file.exists():
+            try:
+                with code_error_file.open("r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    urls = data.get("urls", [])
+            except Exception as e:
+                logger.error(f"读取原有解析失败链接数据失败: {e}")
+        urls.append(link)
+        data["urls"] = urls
+        try:
+            with code_error_file.open("w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=4)
+            logger.info(f"已将解析失败的链接写入 {code_error_file}")
+        except Exception as e:
+            logger.error(f"写入解析失败链接失败: {e}")
+
+    def delete_past_code(self,codes: dict):
+        """删除过期的密令，假设密令过期时间为2个月
+        Args:
+            codes: 当前所有密令的字典，格式为 {code: "2024-06"}
+        """
+        current_timestamp = int(time.time())
+        valid_codes = {}
+        for code, month_str in codes.items():
+            try:
+                month_time = time.strptime(month_str, "%Y-%m")
+                month_timestamp = int(time.mktime(month_time))
+                # 如果当前时间戳与密令月份的时间戳相差不超过2个月（60天），则保留该密令
+                if current_timestamp - month_timestamp <= 60 * 24 * 3600:
+                    valid_codes[code] = month_str
+                else:
+                    logger.info(f"密令 {code} 已过期，删除")
+            except Exception as e:
+                logger.error(f"解析密令 {code} 的月份失败: {e}")
+        return valid_codes
+
+    @event_message_type(EventMessageType.ALL)
+    async def send_code(self, event: AstrMessageEvent):
+        """监听所有消息，如果消息中包含“密令”二字，则发送当前有效的密令列表"""
+        if "密令" not in event.message_str:
+            return
+        #读取密令文件
+        data_dir_str = get_astrbot_data_path()
+        plugin_data_path = Path(data_dir_str) / "plugin_data" / self.name
+        codes_dir = plugin_data_path / "codes"
+        codes_file = codes_dir / "codes.json"
+        codes = {}
+        if codes_file.exists():
+            try:
+                with codes_file.open("r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    codes = data.get("code", {})
+            except Exception as e:
+                logger.error(f"读取密令数据失败: {e}")
+        #每五十个密令增加一个\n
+        codes_list = list(codes.keys())
+        codes_str = ""
+        for i, code in enumerate(codes_list):
+            codes_str += code
+            if (i + 1) % 50 == 0:
+                codes_str += "\n\n"
+            else:
+                codes_str += "\n"
+        #发送密令
+        yield event.plain_result(codes_str)
     # ==================== LLM 工具 ====================
 
     # @llm_tool(name="search_strategy")
