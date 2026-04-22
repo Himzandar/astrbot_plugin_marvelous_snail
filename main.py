@@ -21,6 +21,7 @@ from astrbot.core.utils.session_waiter import SessionController, session_waiter
 
 from .code import parse_code
 from .parse import Parse
+from .sign_in import binds_account, get_server
 from .utils import cron_to_human, send_msg
 
 PLUGIN_NAME = "astrbot_plugin_marvelous_snail"
@@ -32,6 +33,7 @@ class MarvelousSnailPlugin(Star):
         self.config = config
         self.scheduler = AsyncIOScheduler()
         self.authors = {}
+        self.headers = json.loads(config.get("headers", "{}"))
 
     async def initialize(self):
         """插件初始化"""
@@ -486,6 +488,7 @@ class MarvelousSnailPlugin(Star):
             arg = event.message_str.strip()
             parts = arg.split()
             if len(parts) == 0:
+                print("用户正在输入，等待下一次响应...")
                 return
             if isinstance(event, AiocqhttpMessageEvent):#判断aiocqhttp平台
                 if message_id:
@@ -774,6 +777,63 @@ class MarvelousSnailPlugin(Star):
                 codes_str += "\n"
         #发送密令
         yield event.plain_result(codes_str)
+
+    @command("获取最强蜗牛数据")
+    async def get_headers(self,event: AstrMessageEvent,account: str):
+        users_data = await get_server(account)
+        if users_data is None or len(users_data) == 0:
+            await event.send(event.plain_result("❌ 获取数据失败，请检查账号是否正确"))
+            return
+        #配置角色菜单信息供用户选择
+        select_info = "选择需要绑定的角色:"
+        id = 1
+        for user_data in users_data:
+            select_info += f"\n{id}.区服: {user_data.get('server_name')}, 昵称: {user_data.get('role_name')},战力: {user_data.get('extra').get('score')}"
+            id += 1
+        message_id = await send_msg(event, select_info)
+        #如果是群聊记录用户ID,需要撤回
+        group_id = getattr(event.message_obj, "group_id", None)
+        user_id = None
+        if group_id and group_id != 0:
+            user_id = event.get_sender_id()
+        @session_waiter(timeout=20)
+        async def bind_waiter(
+            controller: SessionController, event: AstrMessageEvent
+        ):
+            nonlocal message_id
+            now_user_id = event.get_sender_id()
+            if user_id and now_user_id != user_id:
+                return
+            #可能获取的是正在输入情况，不撤回，不进行后续流程
+            arg = event.message_str.strip()
+            parts = arg.split()
+            if len(parts) == 0:
+                return
+            if isinstance(event, AiocqhttpMessageEvent):#判断aiocqhttp平台
+                if message_id:
+                    await event.bot.delete_msg(message_id=message_id)#用户响应撤回消息
+                    message_id = None
+
+            if len(parts) == 1 and parts[0].isdigit():
+                index = int(parts[0])
+                if index < 1 or index > len(users_data):
+                    return
+                selected_user = users_data[index - 1]
+                result = await binds_account(account, self.headers,selected_user)
+                if result["code"] == 200:
+                    await event.send(event.plain_result(f"✅ 绑定成功:{selected_user['server_name']}-{selected_user['role_name']}-{selected_user['extra']['score']}"))
+                else:
+                    await event.send(event.plain_result(f"❌ 绑定失败，{result.get('message')}"))
+                controller.stop()
+                return
+        try:
+            await bind_waiter(event)
+        except TimeoutError as _:
+            logger.warning("选择超时！")
+            await event.send(event.plain_result("❌ 选择超时，终止运行"))
+        except Exception as e:
+            logger.error("选择发生错误" + str(e))
+        event.stop_event()
     # ==================== LLM 工具 ====================
 
     # @llm_tool(name="search_strategy")

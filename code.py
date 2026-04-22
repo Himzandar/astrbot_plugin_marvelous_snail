@@ -82,13 +82,13 @@ async def parse_code(exporter_api_url, url: str)-> dict:
         return ret
 
 
-if __name__ == "__main__":
-    import asyncio
-    import time
-    url = "https://mp.weixin.qq.com/s/tlJARTVBk_3gx9I7LVFWAw"
-    result = asyncio.run(parse_code("https://www.xiyujing.com:3443",url))
-    timestamp = int(time.time())
-    month_str = time.strftime("%Y-%m", time.localtime(timestamp))
-    print(f"当前月份: {month_str}")
-    print(result)
+# if __name__ == "__main__":
+#     import asyncio
+#     import time
+#     url = "https://mp.weixin.qq.com/s/tlJARTVBk_3gx9I7LVFWAw"
+#     result = asyncio.run(parse_code("https://www.xiyujing.com:3443",url))
+#     timestamp = int(time.time())
+#     month_str = time.strftime("%Y-%m", time.localtime(timestamp))
+#     print(f"当前月份: {month_str}")
+#     print(result)
 

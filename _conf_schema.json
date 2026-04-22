@@ -16,5 +16,11 @@
         "type": "string",
         "hint": "使用 Cron 表达式（分 时 日 月 周）定义。例如：“0 5 * * *” 表示每天 5:00 查询是否有作者更新",
         "default": "0 5 * * *"
+    },
+    "headers": {
+        "description": "微信headers",
+        "type": "string",
+        "hint": "微信headers，包含cookie等信息，格式为JSON对象，例如：{\"cookie\": \"your_cookie_here\"}",
+        "default": "{}"
     }
 }
