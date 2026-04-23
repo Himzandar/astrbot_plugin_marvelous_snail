@@ -18,9 +18,9 @@
         "default": "0 5 * * *"
     },
     "headers": {
-        "description": "微信headers",
+        "description": "请求头信息",
         "type": "string",
-        "hint": "微信headers，包含cookie等信息，格式为JSON对象，例如：{\"cookie\": \"your_cookie_here\"}",
+        "hint": "需要自行获取binds等接口任意请求头信息，可以直接以字典形式复制过来，注意:去除content-length字段",
         "default": "{}"
     }
 }

@@ -5,6 +5,11 @@ from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event import (
     AiocqhttpMessageEvent,
 )
 
+import base64
+from cryptography.fernet import Fernet
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
+import os
 
 def cron_to_human(cron: str) -> str:
     """将 5 段 cron（分 时 日 月 周）转换为中文易读描述
@@ -96,4 +101,24 @@ async def send_msg(event: AstrMessageEvent, msg: str) -> int | None:
         await event.send(event.plain_result(msg))
         return None
 
+# ====================== AES 加密工具（个保法合规必备） ======================
+SECRET_KEY = b"a7s9d2k4f6g5h3j1q8w2e4r6t7y0u5i"  # 自己改一个
 
+def get_fernet():
+    """生成 Fernet 对象用于加密和解密"""
+    kdf = PBKDF2HMAC(
+        algorithm=hashes.SHA256(),
+        length=32,
+        salt=b"Himzandar",
+        iterations=100000,
+    )
+    key = base64.urlsafe_b64encode(kdf.derive(SECRET_KEY))
+    return Fernet(key)
+
+def encrypt_data(text: str) -> str:
+    """加密数据，返回加密后的字符串"""
+    return get_fernet().encrypt(text.encode()).decode()
+
+def decrypt_data(token: str) -> str:
+    """解密数据，返回解密后的字符串"""
+    return get_fernet().decrypt(token.encode()).decode()

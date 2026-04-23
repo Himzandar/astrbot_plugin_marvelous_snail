@@ -2,6 +2,7 @@ import asyncio
 import json
 import random
 import time
+import ast
 from pathlib import Path
 from typing import Any
 
@@ -22,7 +23,7 @@ from astrbot.core.utils.session_waiter import SessionController, session_waiter
 from .code import parse_code
 from .parse import Parse
 from .sign_in import binds_account, get_server
-from .utils import cron_to_human, send_msg
+from .utils import cron_to_human, send_msg,encrypt_data,decrypt_data
 
 PLUGIN_NAME = "astrbot_plugin_marvelous_snail"
 
@@ -33,7 +34,8 @@ class MarvelousSnailPlugin(Star):
         self.config = config
         self.scheduler = AsyncIOScheduler()
         self.authors = {}
-        self.headers = json.loads(config.get("headers", "{}"))
+        self.headers = config.get("headers", "{}")
+        self.headers = ast.literal_eval(self.headers)
 
     async def initialize(self):
         """插件初始化"""
@@ -163,8 +165,7 @@ class MarvelousSnailPlugin(Star):
 
     @command("zqwn_list")
     async def list_saved_accounts(self, event: AstrMessageEvent):
-        """列出已保存的公众号作者
-        """
+        """列出已保存的公众号作者"""
         authors = await self.get_kv_data("authors", {})
         if not authors or len(authors) == 0:
             yield event.plain_result("❌ 请先使用 zqwn 命令搜索公众号作者")
@@ -177,8 +178,7 @@ class MarvelousSnailPlugin(Star):
         yield event.plain_result(result)
 
     async def get_saved_account(self):
-        """获取已保存的公众号作者的最新文章
-        """
+        """获取已保存的公众号作者的最新文章"""
         authors = await self.get_kv_data("authors", {})
         if not authors or len(authors) == 0:
             return
@@ -213,7 +213,7 @@ class MarvelousSnailPlugin(Star):
                                 digest = article.get("digest")
                                 link = article.get("link")
                                 author_name = article.get("author_name")
-                                if author_name == "广告":#如果是广告，就不保存了
+                                if author_name == "广告":  # 如果是广告，就不保存了
                                     continue
                                 if (
                                     name in old_articles.keys()
@@ -231,7 +231,9 @@ class MarvelousSnailPlugin(Star):
                                         logger.debug(
                                             f"✅ 作者 {name} old_aid: {old_aid} aid: {aid} 发布了新文章: {article.get('title')}\n链接: {link}"
                                         )
-                                        await self._send_message(f"作者: {name}\n文章标题: {title}\n文章简介: {digest}\n链接: {link}")
+                                        await self._send_message(
+                                            f"作者: {name}\n文章标题: {title}\n文章简介: {digest}\n链接: {link}"
+                                        )
                                         if name == "最强蜗牛":
                                             # 如果是最强蜗牛的文章，解析密令并发送
                                             code_info = await self.get_code(link)
@@ -240,7 +242,9 @@ class MarvelousSnailPlugin(Star):
                                                 send_txt = f"密令:{code}"
                                                 if code_info.get("share"):
                                                     send_txt += f"\n{digest}"
-                                                    self.write_codes(digest.split("密令：")[-1])
+                                                    self.write_codes(
+                                                        digest.split("密令：")[-1]
+                                                    )
                                                 await self._send_message(send_txt)
                                 else:
                                     # 发布了新文章
@@ -250,7 +254,9 @@ class MarvelousSnailPlugin(Star):
                                     logger.debug(
                                         f"✅ 作者 {name} aid: {aid} 发布了新文章: {article.get('title')}\n链接: {link}"
                                     )
-                                    await self._send_message(f"作者: {name}\n文章标题: {title}\n文章简介: {digest}\n链接: {link}")
+                                    await self._send_message(
+                                        f"作者: {name}\n文章标题: {title}\n文章简介: {digest}\n链接: {link}"
+                                    )
                                     if name == "最强蜗牛":
                                         # 如果是最强蜗牛的文章，解析密令并发送
                                         code_info = await self.get_code(link)
@@ -259,7 +265,9 @@ class MarvelousSnailPlugin(Star):
                                             send_txt = f"密令:{code}"
                                             if code_info.get("share"):
                                                 send_txt += f"\n{digest}"
-                                                self.write_codes(digest.split("密令：")[-1])
+                                                self.write_codes(
+                                                    digest.split("密令：")[-1]
+                                                )
                                             await self._send_message(send_txt)
                             else:
                                 # 处理失败响应
@@ -347,8 +355,7 @@ class MarvelousSnailPlugin(Star):
 
     @command("获取推送列表")
     async def get_push_list(self, event: AstrMessageEvent):
-        """获取推送列表
-        """
+        """获取推送列表"""
         users = await self.get_kv_data("users", {})
         if not users or len(users) == 0:
             yield event.plain_result("❌ 未配置推送用户")
@@ -396,7 +403,7 @@ class MarvelousSnailPlugin(Star):
             await self.put_kv_data("users", users)
             yield event.plain_result(f"✅ {uid} 已关闭自动推送")
 
-    async def save_config(self,authors: str, write_data: Any)-> None:
+    async def save_config(self, authors: str, write_data: Any) -> None:
         """保存数据到本地 JSON 文件，按作者分类保存
         Args:
             authors: 作者名称
@@ -414,25 +421,19 @@ class MarvelousSnailPlugin(Star):
             try:
                 with authors_file.open("r", encoding="utf-8") as f:
                     data = json.load(f)
-                    #获取数据数量
+                    # 获取数据数量
                     num = data.get("num", 0)
                     articles = data.get("articles", [])
-                    #根据时间戳排序articles
+                    # 根据时间戳排序articles
                     # articles.sort(key=lambda x: x.get("update_time", 0), reverse=True)
-                    #头插
+                    # 头插
                     articles.insert(0, write_data)
                     num += 1
-                    data = {
-                        "num": num,
-                        "articles": articles
-                    }
+                    data = {"num": num, "articles": articles}
             except Exception as e:
                 logger.error(f"读取 {authors}.json 失败: {e}")
         else:
-            data = {
-                "num": 1,
-                "articles": [write_data]
-            }
+            data = {"num": 1, "articles": [write_data]}
         # 4.尝试写入文件
         try:
             with authors_file.open("w", encoding="utf-8") as f:
@@ -441,7 +442,7 @@ class MarvelousSnailPlugin(Star):
             logger.error(f"写入 {authors}.json 失败: {e}")
 
     @command("搜索攻略")
-    async def get_strategy(self, event: AstrMessageEvent,parse_str: str):
+    async def get_strategy(self, event: AstrMessageEvent, parse_str: str):
         """获取已保存的文章列表，选择后发送文章详情
         Args:
             parse_str: 搜索关键词
@@ -453,9 +454,9 @@ class MarvelousSnailPlugin(Star):
         page_id = 0
         data_dir_str = get_astrbot_data_path()
         plugin_data_path = Path(data_dir_str) / "plugin_data" / self.name
-        #获取目录下的所有json文件名
+        # 获取目录下的所有json文件名
         json_files = list(plugin_data_path.glob("*.json"))
-        #去掉扩展名后的文件名作为作者列表
+        # 去掉扩展名后的文件名作为作者列表
         authors = [file.stem for file in json_files]
         if not authors or len(authors) == 0:
             logger.info("没有已保存的作者和文章数据，请先添加作者并等待更新")
@@ -465,34 +466,42 @@ class MarvelousSnailPlugin(Star):
         #     self.parse.send_authors_selection(event=event, authors=authors)
         # )
         formatted_authors = [
-            f"{index + 1}. {author}"
-            for index, author in enumerate(authors)
+            f"{index + 1}. {author}" for index, author in enumerate(authors)
         ]
         formatted_authors.insert(0, "需要获取谁的文章详情？请回复编号选择：")
         msg = "\n".join(formatted_authors)
         message_id = await send_msg(event, msg)
-        #如果是群聊记录用户ID
+        # 如果是群聊记录用户ID
         group_id = getattr(event.message_obj, "group_id", None)
         user_id = None
         if group_id and group_id != 0:
             user_id = event.get_sender_id()
+
         @session_waiter(timeout=20)
         async def articles_waiter(
             controller: SessionController, event: AstrMessageEvent
         ):
-            nonlocal user_stage, selected_author, pages_msg, pages_data, message_id,page_id
+            nonlocal \
+                user_stage, \
+                selected_author, \
+                pages_msg, \
+                pages_data, \
+                message_id, \
+                page_id
             now_user_id = event.get_sender_id()
             if user_id and now_user_id != user_id:
                 return
-            #可能获取的是正在输入情况，不撤回，不进行后续流程
+            # 可能获取的是正在输入情况，不撤回，不进行后续流程
             arg = event.message_str.strip()
             parts = arg.split()
             if len(parts) == 0:
                 print("用户正在输入，等待下一次响应...")
                 return
-            if isinstance(event, AiocqhttpMessageEvent):#判断aiocqhttp平台
+            if isinstance(event, AiocqhttpMessageEvent):  # 判断aiocqhttp平台
                 if message_id:
-                    await event.bot.delete_msg(message_id=message_id)#用户响应撤回消息
+                    await event.bot.delete_msg(
+                        message_id=message_id
+                    )  # 用户响应撤回消息
                     message_id = None
 
             if user_stage == "select_author":
@@ -506,16 +515,24 @@ class MarvelousSnailPlugin(Star):
                     return
                 selected_author = authors[index - 1]
                 # 解析作者的文章数据
-                result = await self.parse.parse_title_send_link(plugin_data_path, selected_author, parse_str)
+                result = await self.parse.parse_title_send_link(
+                    plugin_data_path, selected_author, parse_str
+                )
                 if result is None or len(result) == 0:
-                    await event.send(event.plain_result(f"❌ 作者 {selected_author} 没有文章数据"))
+                    await event.send(
+                        event.plain_result(f"❌ 作者 {selected_author} 没有文章数据")
+                    )
                     controller.stop()
                     return
                 user_stage = "select_article"
-                pages_msg, pages_data = await self.parse.Paging_strategies(result["data"], 5)
-                #发送第一页攻略列表
+                pages_msg, pages_data = await self.parse.Paging_strategies(
+                    result["data"], 5
+                )
+                # 发送第一页攻略列表
                 message_id = await send_msg(event, pages_msg[page_id])
-                controller.keep(timeout=20, reset_timeout=True)#重置超时时间，等待用户选择文章
+                controller.keep(
+                    timeout=20, reset_timeout=True
+                )  # 重置超时时间，等待用户选择文章
             elif user_stage == "select_article":
                 arg = event.message_str.strip()
                 parts = arg.split()
@@ -524,7 +541,9 @@ class MarvelousSnailPlugin(Star):
                     select_article_id = int(parts[0])
                 else:
                     return
-                if select_article_id < 1 or select_article_id > len(pages_data[page_id]):
+                if select_article_id < 1 or select_article_id > len(
+                    pages_data[page_id]
+                ):
                     return
                 if select_article_id in pages_data[page_id]:
                     selected = pages_data[page_id][select_article_id]
@@ -535,13 +554,16 @@ class MarvelousSnailPlugin(Star):
                         page_id = min(len(pages_msg) - 1, page_id + 1)
                         message_id = await send_msg(event, pages_msg[page_id])
                     else:
-                        title,link = selected
+                        title, link = selected
                         await event.send(event.plain_result(link))
                         controller.stop()
                         return
                 else:
                     return
-                controller.keep(timeout=20, reset_timeout=True)#重置超时时间，等待用户选择文章
+                controller.keep(
+                    timeout=20, reset_timeout=True
+                )  # 重置超时时间，等待用户选择文章
+
         try:
             await articles_waiter(event)
         except TimeoutError as _:
@@ -551,27 +573,23 @@ class MarvelousSnailPlugin(Star):
             logger.error("选择发生错误" + str(e))
         event.stop_event()
 
-
-
-
-
     # @command("get")
-    async def get_(self,event: AstrMessageEvent,author_in:str):
+    async def get_(self, event: AstrMessageEvent, author_in: str):
         """获取指定作者的所有文章并保存到本地 JSON 文件,需要管理员权限
         Args:
             event: 消息事件对象
             author_in: 作者名称
         """
-        authors = await self.get_kv_data("authors", {})#这个是用来获取fakeid
+        authors = await self.get_kv_data("authors", {})  # 这个是用来获取fakeid
         write_data = []
-        fakeid = authors.get(author_in,"") # type: ignore
+        fakeid = authors.get(author_in, "")  # type: ignore
         logger.info(f"正在获取作者 {author_in} fakeid 为 {fakeid} 的文章列表...")
-        begin = 0 # 起始索引
-        num = 0 #记录有效文章数量
+        begin = 0  # 起始索引
+        num = 0  # 记录有效文章数量
         while True:
             async with aiohttp.ClientSession() as session:
                 headers = {"X-Auth-Key": self.config.get("exporter_auth_key")}
-                params = {"fakeid": fakeid,"begin": begin,"size": 20}
+                params = {"fakeid": fakeid, "begin": begin, "size": 20}
                 try:
                     async with session.get(
                         f"{self.config.get('exporter_api_url')}/api/public/v1/article",
@@ -584,15 +602,17 @@ class MarvelousSnailPlugin(Star):
                             if base_resp and base_resp.get("err_msg") == "ok":
                                 # 处理成功响应
                                 articles = data.get("articles")
-                                logger.info(f"第{begin} 获取到 {len(articles) if articles else 0} 篇文章")
+                                logger.info(
+                                    f"第{begin} 获取到 {len(articles) if articles else 0} 篇文章"
+                                )
                                 if articles is None or len(articles) == 0:
                                     break
                                 for article in articles:
-                                    is_deleted = article.get("is_deleted",False)
-                                    if is_deleted:#如果文章被删除了，就不保存
+                                    is_deleted = article.get("is_deleted", False)
+                                    if is_deleted:  # 如果文章被删除了，就不保存
                                         continue
-                                    write_data.append(article)# 保存
-                                    num+=1
+                                    write_data.append(article)  # 保存
+                                    num += 1
                             else:
                                 # 处理失败响应
                                 logger.error(
@@ -606,13 +626,13 @@ class MarvelousSnailPlugin(Star):
                     logger.error("获取公众号文章失败")
                     break
             logger.debug(f"第{begin}请求，已获取 {num} 篇有效文章")
-            #休眠防止请求过快被封IP，间隔随机3-5秒
+            # 休眠防止请求过快被封IP，间隔随机3-5秒
             random_factor = random.uniform(3, 5)
             delay = max(5, random_factor)  # 确保间隔至少为5秒
             await asyncio.sleep(delay)
         logger.info(f"共获取到 {num} 篇有效文章")
 
-        #保存数据到本地JSON文件
+        # 保存数据到本地JSON文件
         # 1. 获取字符串路径，并显式转换为 Path 对象
         data_dir_str = get_astrbot_data_path()
         plugin_data_path = Path(data_dir_str) / "plugin_data" / self.name
@@ -620,10 +640,7 @@ class MarvelousSnailPlugin(Star):
         # 2. 创建目录 (此时 plugin_data_path 是 Path 对象，所以 .mkdir() 可用)
         plugin_data_path.mkdir(parents=True, exist_ok=True)
         authors_file = plugin_data_path / f"{author_in}.json"
-        data = {
-            "num": num,
-            "articles": write_data
-        }
+        data = {"num": num, "articles": write_data}
         # 3.尝试写入文件
         try:
             with authors_file.open("w", encoding="utf-8") as f:
@@ -631,16 +648,12 @@ class MarvelousSnailPlugin(Star):
         except Exception as e:
             logger.error(f"写入 {author_in}.json 失败: {e}")
 
-
-    async def get_code(self,link: str):
+    async def get_code(self, link: str):
         """解析密令
         Args:
             link: 文章链接
         """
-        ret = {
-            "code": "",
-            "share": False
-        }
+        ret = {"code": "", "share": False}
         exporter_api_url = self.config.get("exporter_api_url")
         parse_code_result = await parse_code(exporter_api_url, link)
         if parse_code_result.get("msg") == "解析成功":
@@ -648,7 +661,7 @@ class MarvelousSnailPlugin(Star):
             ret["code"] = code
             self.write_codes(code)
             logger.info(f"解析密令成功: {code}")
-            #判断是否存在share
+            # 判断是否存在share
             if parse_code_result["share"]:
                 ret["share"] = True
             return ret
@@ -662,10 +675,7 @@ class MarvelousSnailPlugin(Star):
         Args:
             code: 解析得到的密令
         """
-        data = {
-            "num": 0,
-            "code": {}
-        }
+        data = {"num": 0, "code": {}}
         # 1. 获取字符串路径，并显式转换为 Path 对象
         data_dir_str = get_astrbot_data_path()
         plugin_data_path = Path(data_dir_str) / "plugin_data" / self.name
@@ -673,7 +683,7 @@ class MarvelousSnailPlugin(Star):
         codes_dir = plugin_data_path / "codes"
         codes_dir.mkdir(parents=True, exist_ok=True)
         codes_file = codes_dir / "codes.json"
-        #读取原有的密令数据
+        # 读取原有的密令数据
         codes = {}
         if codes_file.exists():
             try:
@@ -682,11 +692,11 @@ class MarvelousSnailPlugin(Star):
                     codes = data.get("code", {})
             except Exception as e:
                 logger.error(f"读取原有密令数据失败: {e}")
-        #获取当前时间戳,转换为月份格式，作为密令的值
+        # 获取当前时间戳,转换为月份格式，作为密令的值
         timestamp = int(time.time())
         month_str = time.strftime("%Y-%m", time.localtime(timestamp))
         codes[code] = month_str
-        #删除过期的密令
+        # 删除过期的密令
         codes = self.delete_past_code(codes)
         data["code"] = codes
         data["num"] = len(codes)
@@ -710,7 +720,7 @@ class MarvelousSnailPlugin(Star):
         codes_dir = plugin_data_path / "codes"
         codes_dir.mkdir(parents=True, exist_ok=True)
         code_error_file = codes_dir / "code_error.json"
-        #读取原有的解析失败链接数据
+        # 读取原有的解析失败链接数据
         urls = []
         if code_error_file.exists():
             try:
@@ -728,7 +738,7 @@ class MarvelousSnailPlugin(Star):
         except Exception as e:
             logger.error(f"写入解析失败链接失败: {e}")
 
-    def delete_past_code(self,codes: dict):
+    def delete_past_code(self, codes: dict):
         """删除过期的密令，假设密令过期时间为2个月
         Args:
             codes: 当前所有密令的字典，格式为 {code: "2024-06"}
@@ -753,7 +763,7 @@ class MarvelousSnailPlugin(Star):
         """监听所有消息，如果消息中包含“密令”二字，则发送当前有效的密令列表"""
         if "密令" not in event.message_str:
             return
-        #读取密令文件
+        # 读取密令文件
         data_dir_str = get_astrbot_data_path()
         plugin_data_path = Path(data_dir_str) / "plugin_data" / self.name
         codes_dir = plugin_data_path / "codes"
@@ -766,7 +776,7 @@ class MarvelousSnailPlugin(Star):
                     codes = data.get("code", {})
             except Exception as e:
                 logger.error(f"读取密令数据失败: {e}")
-        #每五十个密令增加一个\n
+        # 每五十个密令增加一个\n
         codes_list = list(codes.keys())
         codes_str = ""
         for i, code in enumerate(codes_list):
@@ -775,43 +785,44 @@ class MarvelousSnailPlugin(Star):
                 codes_str += "\n\n"
             else:
                 codes_str += "\n"
-        #发送密令
+        # 发送密令
         yield event.plain_result(codes_str)
 
     @command("获取最强蜗牛数据")
-    async def get_headers(self,event: AstrMessageEvent,account: str):
+    async def get_headers(self, event: AstrMessageEvent, account: str):
         users_data = await get_server(account)
         if users_data is None or len(users_data) == 0:
             await event.send(event.plain_result("❌ 获取数据失败，请检查账号是否正确"))
             return
-        #配置角色菜单信息供用户选择
+        # 配置角色菜单信息供用户选择
         select_info = "选择需要绑定的角色:"
         id = 1
         for user_data in users_data:
             select_info += f"\n{id}.区服: {user_data.get('server_name')}, 昵称: {user_data.get('role_name')},战力: {user_data.get('extra').get('score')}"
             id += 1
         message_id = await send_msg(event, select_info)
-        #如果是群聊记录用户ID,需要撤回
+        # 如果是群聊记录用户ID,需要撤回
         group_id = getattr(event.message_obj, "group_id", None)
         user_id = None
         if group_id and group_id != 0:
             user_id = event.get_sender_id()
+
         @session_waiter(timeout=20)
-        async def bind_waiter(
-            controller: SessionController, event: AstrMessageEvent
-        ):
+        async def bind_waiter(controller: SessionController, event: AstrMessageEvent):
             nonlocal message_id
             now_user_id = event.get_sender_id()
             if user_id and now_user_id != user_id:
                 return
-            #可能获取的是正在输入情况，不撤回，不进行后续流程
+            # 可能获取的是正在输入情况，不撤回，不进行后续流程
             arg = event.message_str.strip()
             parts = arg.split()
             if len(parts) == 0:
                 return
-            if isinstance(event, AiocqhttpMessageEvent):#判断aiocqhttp平台
+            if isinstance(event, AiocqhttpMessageEvent):  # 判断aiocqhttp平台
                 if message_id:
-                    await event.bot.delete_msg(message_id=message_id)#用户响应撤回消息
+                    await event.bot.delete_msg(
+                        message_id=message_id
+                    )  # 用户响应撤回消息
                     message_id = None
 
             if len(parts) == 1 and parts[0].isdigit():
@@ -819,13 +830,32 @@ class MarvelousSnailPlugin(Star):
                 if index < 1 or index > len(users_data):
                     return
                 selected_user = users_data[index - 1]
-                result = await binds_account(account, self.headers,selected_user)
+                result = await binds_account(account, self.headers, selected_user)
                 if result["code"] == 200:
-                    await event.send(event.plain_result(f"✅ 绑定成功:{selected_user['server_name']}-{selected_user['role_name']}-{selected_user['extra']['score']}"))
+                    await event.send(
+                        event.plain_result(
+                            f"✅ 绑定成功:{selected_user['server_name']}-{selected_user['role_name']}-{selected_user['extra']['score']}"
+                        )
+                    )
+                    #加密保存数据
+                    encrypted_account = encrypt_data(account)
+                    encrypted_data = encrypt_data(json.dumps(selected_user,ensure_ascii=False))
+                    # 保存加密后的数据到本地 JSON 文件
+                    data_dir_str = get_astrbot_data_path()
+                    plugin_data_path = Path(data_dir_str) / "plugin_data" / self.name
+                    plugin_data_path.mkdir(parents=True, exist_ok=True)
+                    user_dir = plugin_data_path / "users"
+                    user_dir.mkdir(parents=True, exist_ok=True)
+                    user_file = user_dir / "data.json"
+                    with open(user_file, "w", encoding="utf-8") as f:
+                        json.dump({"account": encrypted_account, "data": encrypted_data}, f, ensure_ascii=False, indent=4)
                 else:
-                    await event.send(event.plain_result(f"❌ 绑定失败，{result.get('message')}"))
+                    await event.send(
+                        event.plain_result(f"❌ 绑定失败，{result.get('message')}")
+                    )
                 controller.stop()
                 return
+
         try:
             await bind_waiter(event)
         except TimeoutError as _:
@@ -834,6 +864,7 @@ class MarvelousSnailPlugin(Star):
         except Exception as e:
             logger.error("选择发生错误" + str(e))
         event.stop_event()
+
     # ==================== LLM 工具 ====================
 
     # @llm_tool(name="search_strategy")
