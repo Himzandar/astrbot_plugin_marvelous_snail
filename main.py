@@ -332,6 +332,18 @@ class MarvelousSnailPlugin(Star):
                 logger.error(f"Cron 表达式错误：{updata_cron} ({e})")
         except Exception as e:
             logger.error(f"添加任务失败：{e}")
+        #如果headers存在，设置每日八点10分执行签到任务
+        if self.headers:
+            try:
+                sign_trigger = CronTrigger(hour=8, minute=10)
+                self.scheduler.add_job(
+                    self.auto_sign_in,
+                    trigger=sign_trigger,
+                    id="auto_sign_in_job",
+                )
+                logger.info("已注册自动签到任务：每天 08:10")
+            except Exception as e:
+                logger.error(f"添加自动签到任务失败：{e}")
 
     async def _send_message(self, message: str):
         """发送消息
@@ -578,81 +590,6 @@ class MarvelousSnailPlugin(Star):
         except Exception as e:
             logger.error("选择发生错误" + str(e))
         event.stop_event()
-
-    # @command("get")
-    async def get_(self, event: AstrMessageEvent, author_in: str):
-        """获取指定作者的所有文章并保存到本地 JSON 文件,需要管理员权限
-        Args:
-            event: 消息事件对象
-            author_in: 作者名称
-        """
-        authors = await self.get_kv_data("authors", {})  # 这个是用来获取fakeid
-        write_data = []
-        fakeid = authors.get(author_in, "")  # type: ignore
-        logger.info(f"正在获取作者 {author_in} fakeid 为 {fakeid} 的文章列表...")
-        begin = 0  # 起始索引
-        num = 0  # 记录有效文章数量
-        while True:
-            async with aiohttp.ClientSession() as session:
-                headers = {"X-Auth-Key": self.config.get("exporter_auth_key")}
-                params = {"fakeid": fakeid, "begin": begin, "size": 20}
-                try:
-                    async with session.get(
-                        f"{self.config.get('exporter_api_url')}/api/public/v1/article",
-                        headers=headers,
-                        params=params,
-                    ) as resp:
-                        try:
-                            data = await resp.json()
-                            base_resp = data.get("base_resp")
-                            if base_resp and base_resp.get("err_msg") == "ok":
-                                # 处理成功响应
-                                articles = data.get("articles")
-                                logger.info(
-                                    f"第{begin} 获取到 {len(articles) if articles else 0} 篇文章"
-                                )
-                                if articles is None or len(articles) == 0:
-                                    break
-                                for article in articles:
-                                    is_deleted = article.get("is_deleted", False)
-                                    if is_deleted:  # 如果文章被删除了，就不保存
-                                        continue
-                                    write_data.append(article)  # 保存
-                                    num += 1
-                            else:
-                                # 处理失败响应
-                                logger.error(
-                                    f"❌ 获取{author_in}的文章失败: {data.get('base_resp').get('err_msg')}"
-                                )
-                            begin += 20
-                        except (ValueError, KeyError):
-                            logger.error("API 响应解析失败")
-                            break
-                except Exception:
-                    logger.error("获取公众号文章失败")
-                    break
-            logger.debug(f"第{begin}请求，已获取 {num} 篇有效文章")
-            # 休眠防止请求过快被封IP，间隔随机3-5秒
-            random_factor = random.uniform(3, 5)
-            delay = max(5, random_factor)  # 确保间隔至少为5秒
-            await asyncio.sleep(delay)
-        logger.info(f"共获取到 {num} 篇有效文章")
-
-        # 保存数据到本地JSON文件
-        # 1. 获取字符串路径，并显式转换为 Path 对象
-        data_dir_str = get_astrbot_data_path()
-        plugin_data_path = Path(data_dir_str) / "plugin_data" / self.name
-
-        # 2. 创建目录 (此时 plugin_data_path 是 Path 对象，所以 .mkdir() 可用)
-        plugin_data_path.mkdir(parents=True, exist_ok=True)
-        authors_file = plugin_data_path / f"{author_in}.json"
-        data = {"num": num, "articles": write_data}
-        # 3.尝试写入文件
-        try:
-            with authors_file.open("w", encoding="utf-8") as f:
-                json.dump(data, f, ensure_ascii=False, indent=4)
-        except Exception as e:
-            logger.error(f"写入 {author_in}.json 失败: {e}")
 
     async def get_code(self, link: str):
         """解析密令
@@ -1023,7 +960,8 @@ class MarvelousSnailPlugin(Star):
 
     @command("签到")
     async def sign(self, event: AstrMessageEvent):
-        """"""
+        """签到功能，查询已绑定的角色，选择后执行签到
+        """
         #读取文件
         data_dir_str = get_astrbot_data_path()
         plugin_data_path = Path(data_dir_str) / "plugin_data" / self.name
@@ -1061,7 +999,7 @@ class MarvelousSnailPlugin(Star):
                                         f"✅ {user['info']} 签到成功: {sign_result.get('message')}"
                                     )
                                 )
-                                return
+                                continue
                             else:
                                 logger.error(f"绑定失败，账号: {account}, 角色: {user['info']}, 错误信息: {result.get('message')}")
                     logger.error(f"未找到匹配的角色信息，账号: {account}, 角色ID: {role_id}")
@@ -1069,6 +1007,126 @@ class MarvelousSnailPlugin(Star):
             logger.error(f"读取用户数据失败: {e}")
             await event.send(event.plain_result("❌ 读取数据失败"))
             return
+
+    @command("定时签到推送")
+    async def schedule_sign(self, event: AstrMessageEvent,enabled: str):
+        """定时签到推送开关
+        Args:
+            enabled: "开启" 或 "关闭"
+        """
+        #群聊屏蔽
+        group_id = getattr(event.message_obj, "group_id", None)
+        if group_id and group_id != 0:
+            yield event.plain_result("❌ 群聊暂不支持定时签到信息推送")
+            return
+        #获取用户ID
+        uid = event.get_sender_id()
+        users = await self.get_kv_data("users_sign", {})
+        if enabled not in ["开启", "关闭"]:
+            yield event.plain_result(
+                "❌ 参数错误，请使用：定时签到推送 开启 或 定时签到推送 关闭"
+            )
+            return
+        if enabled == "开启":
+            user_info = {
+                "umo": event.unified_msg_origin,  # 保存统一会话ID
+            }
+            users[uid] = user_info  # type: ignore
+            await self.put_kv_data("users_sign", users)
+            yield event.plain_result(f"✅ {uid} 已开启定时签到推送")
+        else:
+            #关闭直接删除用户的推送信息
+            if users.get(uid) is not None:  # type: ignore
+                del users[uid] # type: ignore
+            await self.put_kv_data("users_sign", users)
+            yield event.plain_result(f"✅ {uid} 已关闭定时签到推送")
+
+    async def auto_sign_in(self):
+        """定时签到功能，查询已绑定的角色，选择后执行签到
+        """
+        #获取推送信息列表
+        users_sign = await self.get_kv_data("users_sign", {})
+        umo = None
+        #读取文件
+        data_dir_str = get_astrbot_data_path()
+        plugin_data_path = Path(data_dir_str) / "plugin_data" / self.name
+        user_dir = plugin_data_path / "users"
+        #定时任务所以获取目录下所有的文件名，文件名即用户ID，根据文件获取用户数据并执行签到
+        for user_file in user_dir.glob("*.json"):
+            user_id = user_file.stem
+            user_file = user_dir / f"{user_id}.json"
+            send_info = "【定时签到推送】"
+            if users_sign.get(user_id) is not None:  # type: ignore
+                umo = users_sign[user_id].get("umo")  # type: ignore
+            if not user_file.exists():
+                send_info += "\n未找到绑定数据，无法执行签到"
+                if umo:
+                    await self.context.send_message(umo, send_info)  # type: ignore
+                logger.error(f"未找到用户 {user_id} 的绑定数据文件，无法执行签到")
+                continue
+            try:
+                #读取用户数据
+                with user_file.open("r", encoding="utf-8") as f:
+                    user_data = json.load(f)
+                    users = user_data.get("users", [])
+                    #去重role_id相同的角色，只保留最新的一个
+                    unique_users = {}
+                    for user in users:
+                        role_id = decrypt_data(user["role_id"])
+                        unique_users[role_id] = user
+                    users = list(unique_users.values())
+                    writer_data = []
+                    for user in users:
+                        #获取角色信息
+                        account = decrypt_data(user["account"])
+                        role_id = decrypt_data(user["role_id"])
+                        info = user.get("info", "")
+                        users_data = await get_server(account)  # 获取最新的角色信息，更新info显示
+                        if users_data is None or len(users_data) == 0:
+                            send_info += f"\n{info}:获取数据失败，无法执行签到"
+                            logger.error(f"获取数据失败，账号: {account}")
+                            continue
+                        info = user.get("info", "")
+                        for user_data in users_data:
+                            if user_data["role_id"] == role_id:
+                                user["info"] = user_data.get("info", info)  # 更新角色信息显示
+                                #编码数据
+                                payload = convert_to_query_bytes(user_data,account)
+                                #绑定角色
+                                result = await binds_account(self.headers, payload)
+                                if result["code"] == 200:
+                                    sign_result = await sign_request(self.headers)
+                                    send_info += f"\n{user['info']}:签到成功, {sign_result.get('message')}"
+                                    #休眠3-5秒，防止请求过快被封IP，间隔随机3-5秒
+                                    random_factor = random.uniform(3, 5)
+                                    delay = max(3, random_factor)  # 确保间隔至少为3秒
+                                    await asyncio.sleep(delay)
+                                else:
+                                    send_info += f"\n{user['info']}:绑定失败，账号: {account}, 错误信息: {result.get('message')}"
+                                writer_data.append(user)
+                                break
+            except Exception as e:
+                logger.error(f"读取用户数据失败: {e}")
+                return
+            #发送签到结果
+            if umo:
+                message_chain = MessageChain().message(send_info)  # type: ignore
+                try:
+                    await self.context.send_message(umo, message_chain)  # type: ignore
+                    logger.info(f"已发送消息给用户 {umo}: {send_info}")
+                except Exception as e:
+                    logger.error(f"发送消息给用户 {umo} 失败: {e}")
+                umo = None
+            #更新文件数据写入
+            user_data["users"] = writer_data
+            user_data["num"] = len(writer_data)
+            with user_file.open("w", encoding="utf-8") as f:
+                json.dump(user_data, f, ensure_ascii=False, indent=4)
+            #一个用户签到结束，休眠1-3分钟，防止请求过快被封IP，间隔随机1-3分钟
+            random_factor = random.uniform(60, 180)
+            delay = max(60, random_factor)  # 确保间隔至少为1分钟
+            await asyncio.sleep(delay)
+            logger.info(f"用户 {user_id} 的定时签到已完成，休眠{delay}秒后继续下一个用户签到")
 
     # ==================== LLM 工具 ====================
 
