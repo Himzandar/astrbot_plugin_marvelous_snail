@@ -48,7 +48,7 @@ class MarvelousSnailPlugin(Star):
         logger.info("最强蜗牛插件已加载")
         self.parse = Parse()
         # await self.get_saved_account()
-        self._start_auto_updata_job()
+        await self._start_auto_updata_job()
         if not self.scheduler.running:
             self.scheduler.start()
 
@@ -295,7 +295,7 @@ class MarvelousSnailPlugin(Star):
         else:
             await self.put_kv_data("articles", new_articles)
 
-    def _start_auto_updata_job(self):
+    async def _start_auto_updata_job(self):
         """根据配置的 Cron 表达式设置监控任务
         Cron 表达式示例：0 0 * * *（每天凌晨0点执行）"""
         scheduler = self.scheduler
@@ -332,7 +332,7 @@ class MarvelousSnailPlugin(Star):
                 logger.error(f"Cron 表达式错误：{updata_cron} ({e})")
         except Exception as e:
             logger.error(f"添加任务失败：{e}")
-        #如果headers存在，设置每日八点10分执行签到任务
+        #如果headers存在，设置每日八点10分执行签到任务，并设置30分钟发送签到命令进行header保持
         if self.headers:
             try:
                 sign_trigger = CronTrigger(hour=8, minute=10)
@@ -344,6 +344,19 @@ class MarvelousSnailPlugin(Star):
                 logger.info("已注册自动签到任务：每天 08:10")
             except Exception as e:
                 logger.error(f"添加自动签到任务失败：{e}")
+            try:
+                self.scheduler.add_job(
+                    sign_request,
+                    trigger=CronTrigger(minute="*/1"),
+                    id="keep_sign_in_job",
+                    args=[self.headers],
+                )
+                logger.info("已注册签到保持任务：每30分钟执行一次")
+                # 立即执行一次签到保持任务，确保在插件加载时就开始保持
+                ret = await sign_request(self.headers)
+                logger.info(f"初始签到保持结果: {ret}")
+            except Exception as e:
+                logger.error(f"添加签到保持任务失败：{e}")
 
     async def _send_message(self, message: str):
         """发送消息
