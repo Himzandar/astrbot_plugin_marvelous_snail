@@ -1,7 +1,7 @@
 #sign_in.py
-import aiohttp
-import asyncio
 import base64
+
+import aiohttp
 
 api = "https://api.qingcigame.com"
 app_id = "39"
@@ -9,6 +9,12 @@ page_id = "1"
 
 
 async def get_server(account: str):
+    """查询账号绑定的角色信息
+    Args:
+        account: 账号
+    Returns:
+        绑定的角色信息，如果查询失败返回 None
+    """
     url = f"{api}/game/server"
     params = {
             "account": account,
@@ -16,7 +22,6 @@ async def get_server(account: str):
             "page_id": page_id,
         }
     async with aiohttp.ClientSession() as session:
-        ret = []
         async with session.get(url, params=params) as response:
             datas = await response.json()
             if datas.get("code") == 200:
@@ -25,56 +30,36 @@ async def get_server(account: str):
                     datas = datas.get(key, {})
                     if not datas:
                         return None
-                #解析数据按指定格式存储
-                for data in datas:
-                    bindParams={
-                        "game_id": 39,
-                        "role_id": data["role_id"],
-                        "role_name": data["role_name"],
-                        "server_id": data["server_id"],
-                        "server_name": data["server_name"],
-                        "type": "android",
-                        "platform": data["platform"],
-                        "extra":
-                        {
-                            "zone": data["extra"]["zone"],
-                            "account": data["extra"]["account"],
-                            "token": data["extra"]["token"],
-                            "score": data["extra"]["score"]
-                        }
-                    }
-                    ret.append(bindParams)
-                return ret
+                return datas
             else:
                 return None
 
 
-async def binds_account(account,headers,bindParams):
+async def binds_account(headers,payload):
+    """执行绑定请求
+    Args:
+        headers: 请求头
+        payload: 请求体
+    Returns:
+        绑定结果的 JSON 数据
+    """
     url = f"{api}/game/binds"
-    data = {"account": account, "page_id": page_id, **bindParams}
-    # print(headers)
     async with aiohttp.ClientSession() as session:
-        async with session.post(url,headers=headers, data=data) as resp:
-            # 必须 await 读取响应内容，否则 resp.text() 只是一个协程对象
+        async with session.post(url,headers=headers, data=payload) as resp:
             data = await resp.json()
             return data
 
-# async def sign_request():
-#     """执行签到请求"""
-#     payload=base64.b64decode("YXBwX2lkPTM5JnBhZ2VfaWQ9MSZnYW1lX2lkPTM5").decode()
-#     async with aiohttp.ClientSession() as session:
-#         async with session.post(f"{api}/game/sign/record", headers=headers, data=payload) as response:
-#             print("状态码:", response.status)
-#             # 安全解析 JSON
-#             try:
-#                 result = await response.json()
-#             except:
-#                 result = await response.text()
-#             print(f"签到结果: {result}")
-#             return result
-
-
-# get_server_result = asyncio.run(get_server(account))
-# print(get_server_result)
-# sign_request_result = asyncio.run(sign_request())
-
+async def sign_request(headers):
+    """执行签到请求
+    Args:
+        headers: 请求头
+    Returns:
+        签到结果的 JSON 数据
+    """
+    url = f"{api}/game/sign/record"
+    payload = base64.b64decode("YXBwX2lkPTM5JnBhZ2VfaWQ9MSZnYW1lX2lkPTM5")
+    # print(headers)
+    async with aiohttp.ClientSession() as session:
+        async with session.post(url,headers=headers, data=payload) as resp:
+            data = await resp.json()
+            return data

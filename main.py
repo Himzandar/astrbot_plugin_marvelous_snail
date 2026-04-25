@@ -1,8 +1,8 @@
+import ast
 import asyncio
 import json
 import random
 import time
-import ast
 from pathlib import Path
 from typing import Any
 
@@ -22,8 +22,14 @@ from astrbot.core.utils.session_waiter import SessionController, session_waiter
 
 from .code import parse_code
 from .parse import Parse
-from .sign_in import binds_account, get_server
-from .utils import cron_to_human, send_msg,encrypt_data,decrypt_data
+from .sign_in import binds_account, get_server, sign_request
+from .utils import (
+    convert_to_query_bytes,
+    cron_to_human,
+    decrypt_data,
+    encrypt_data,
+    send_msg,
+)
 
 PLUGIN_NAME = "astrbot_plugin_marvelous_snail"
 
@@ -788,8 +794,22 @@ class MarvelousSnailPlugin(Star):
         # 发送密令
         yield event.plain_result(codes_str)
 
-    @command("获取最强蜗牛数据")
+    @command("绑定账号")
     async def get_headers(self, event: AstrMessageEvent, account: str):
+        """
+        获取账号的请求头信息，查询账号绑定的角色，选择角色后绑定账号并保存数据
+        Args:
+            account: 账号"
+        """
+        info = "【个人信息处理告知】\
+            \n你当前申请绑定账号用于本机器人无偿每日签到服务，我方依据《个人信息保护法》向你完整告知：\
+            \n1. 处理数据范围：仅存储你的【手机号、游戏角色ID】，无任何多余信息收集。\
+            \n2. 存储期限：**账号绑定存续期间全程存储**，你随时可申请删除，删除后全部数据永久清除无备份。\
+            \n3. 数据安全：所有数据服务器端**AES加密存储**，不明文存储、不泄露、不转卖、不共享、不对外传输任何第三方。\
+            \n4. 你的全部法定权利：随时查询本人数据、随时一键删除全部数据、撤回本次授权。\
+            \n5. 本服务全程无偿、无商业盈利、非经营性个人互助服务。\
+            \n请你确认全部内容并自愿授权，后续【选择角色】即视为自愿授权信息并完成完成绑定。"
+        await event.send(event.plain_result(info))
         users_data = await get_server(account)
         if users_data is None or len(users_data) == 0:
             await event.send(event.plain_result("❌ 获取数据失败，请检查账号是否正确"))
@@ -807,9 +827,9 @@ class MarvelousSnailPlugin(Star):
         if group_id and group_id != 0:
             user_id = event.get_sender_id()
 
-        @session_waiter(timeout=20)
+        @session_waiter(timeout=60)
         async def bind_waiter(controller: SessionController, event: AstrMessageEvent):
-            nonlocal message_id
+            nonlocal message_id, user_id
             now_user_id = event.get_sender_id()
             if user_id and now_user_id != user_id:
                 return
@@ -830,32 +850,73 @@ class MarvelousSnailPlugin(Star):
                 if index < 1 or index > len(users_data):
                     return
                 selected_user = users_data[index - 1]
-                result = await binds_account(account, self.headers, selected_user)
+                logger.info("编码中")
+                payload = convert_to_query_bytes(selected_user, account)
+                logger.info("正在绑定账号...")
+                result = await binds_account(self.headers, payload)
                 if result["code"] == 200:
                     await event.send(
                         event.plain_result(
-                            f"✅ 绑定成功:{selected_user['server_name']}-{selected_user['role_name']}-{selected_user['extra']['score']}"
+                            f"✅ 绑定成功:{selected_user['server_name']}-{selected_user['role_name']}:{selected_user['extra']['score']}"
                         )
                     )
-                    #加密保存数据
+                    #首次绑定执行一次签到
+                    sign_result = await sign_request(self.headers)
+                    await event.send(
+                        event.plain_result(f"首次绑定执行签到: {sign_result.get('message')}")
+                    )
+                    # 加密保存数据
                     encrypted_account = encrypt_data(account)
-                    encrypted_data = encrypt_data(json.dumps(selected_user,ensure_ascii=False))
+                    encrypted_role_id = encrypt_data(selected_user["role_id"])
+                    # 获取用户ID
+                    user_id = event.get_sender_id()
                     # 保存加密后的数据到本地 JSON 文件
                     data_dir_str = get_astrbot_data_path()
                     plugin_data_path = Path(data_dir_str) / "plugin_data" / self.name
                     plugin_data_path.mkdir(parents=True, exist_ok=True)
                     user_dir = plugin_data_path / "users"
                     user_dir.mkdir(parents=True, exist_ok=True)
-                    user_file = user_dir / "data.json"
+                    # 根据用户ID创建JSON文件保存数据，方便后续查询和使用
+                    user_file = user_dir / f"{user_id}.json"
+                    # 先判断是否存在文件，如果存在就读取原有数据，更新后再写入，如果不存在就直接写入
+                    user_data = {"num": 0, "users": []}
+                    if user_file.exists():
+                        try:
+                            with user_file.open("r", encoding="utf-8") as f:
+                                user_data = json.load(f)
+                        except Exception as e:
+                            logger.error(f"读取用户数据失败: {e}")
+                    if user_data or user_data.get("num", 0) > 0:
+                        users = user_data.get("users", [])
+                        users.append(
+                            {
+                                "account": encrypted_account,
+                                "role_id": encrypted_role_id,
+                                "info": f"{selected_user['server_name']}-{selected_user['role_name']}:{selected_user['extra']['score']}",
+                            }
+                        )
+                        user_data["users"] = users
+                        user_data["num"] = len(users)
+                    else:
+                        user_data = {
+                            "num": 1,
+                            "users": [
+                                {
+                                    "account": encrypted_account,
+                                    "role_id": encrypted_role_id,
+                                    "info": f"{selected_user['server_name']}-{selected_user['role_name']}:{selected_user['extra']['score']}",
+                                }
+                            ],
+                        }
                     with open(user_file, "w", encoding="utf-8") as f:
-                        json.dump({"account": encrypted_account, "data": encrypted_data}, f, ensure_ascii=False, indent=4)
+                        json.dump(user_data, f, ensure_ascii=False, indent=4)
+                    logger.info(f"已将绑定数据写入 {user_file}")
                 else:
                     await event.send(
                         event.plain_result(f"❌ 绑定失败，{result.get('message')}")
                     )
                 controller.stop()
                 return
-
         try:
             await bind_waiter(event)
         except TimeoutError as _:
@@ -864,6 +925,150 @@ class MarvelousSnailPlugin(Star):
         except Exception as e:
             logger.error("选择发生错误" + str(e))
         event.stop_event()
+
+    @command("查询绑定")
+    async def query_account(self, event: AstrMessageEvent):
+        """查询已绑定的账号，显示已绑定的角色信息
+        """
+        # 获取用户ID
+        user_id = event.get_sender_id()
+        # 读取用户数据文件
+        data_dir_str = get_astrbot_data_path()
+        plugin_data_path = Path(data_dir_str) / "plugin_data" / self.name
+        user_dir = plugin_data_path / "users"
+        user_file = user_dir / f"{user_id}.json"
+        if not user_file.exists():
+            await event.send(event.plain_result("❌ 未找到绑定数据"))
+            return
+        try:
+            with user_file.open("r", encoding="utf-8") as f:
+                user_data = json.load(f)
+                users = user_data.get("users", [])
+                if not users or len(users) == 0:
+                    await event.send(event.plain_result("❌ 未找到绑定数据"))
+                    return
+                info_str = "已绑定的角色信息:"
+                for user in users:
+                    info_str += f"\n{user['info']}"
+                await event.send(event.plain_result(info_str))
+        except Exception as e:
+            logger.error(f"读取用户数据失败: {e}")
+            await event.send(event.plain_result("❌ 读取数据失败"))
+            return
+
+    @command("注销绑定")
+    async def delete_account(self, event: AstrMessageEvent):
+        """删除已绑定的账号，查询已绑定的角色，选择后删除账号数据
+        """
+        # 获取用户ID
+        user_id = event.get_sender_id()
+        # 读取用户数据文件
+        data_dir_str = get_astrbot_data_path()
+        plugin_data_path = Path(data_dir_str) / "plugin_data" / self.name
+        user_dir = plugin_data_path / "users"
+        user_file = user_dir / f"{user_id}.json"
+        if not user_file.exists():
+            await event.send(event.plain_result("❌ 未找到绑定数据"))
+            return
+        try:
+            with user_file.open("r", encoding="utf-8") as f:
+                user_data = json.load(f)
+                users = user_data.get("users", [])
+                if not users or len(users) == 0:
+                    await event.send(event.plain_result("❌ 未找到绑定数据"))
+                    return
+                # 显示已绑定的账号和角色供用户选择
+                select_info = "选择需要删除的账号:"
+                id = 1
+                for user in users:
+                    select_info += f"\n{id}. {user['info']}"
+                    id += 1
+                message_id = await send_msg(event, select_info)
+                @session_waiter(timeout=20)
+                async def delete_waiter(controller: SessionController, event: AstrMessageEvent):
+                    nonlocal message_id, users, user_file, user_id
+                    now_user_id = event.get_sender_id()
+                    if now_user_id != user_id:
+                        return
+                    arg = event.message_str.strip()
+                    parts = arg.split()
+                    if len(parts) == 0:
+                        return
+                    if isinstance(event, AiocqhttpMessageEvent):  # 判断aiocqhttp平台
+                        if message_id:
+                            await event.bot.delete_msg(
+                                message_id=message_id
+                            )  # 用户响应撤回消息
+                            message_id = None
+                    if len(parts) == 1 and parts[0].isdigit():
+                        index = int(parts[0])
+                        if index < 1 or index > len(users):
+                            return
+                        selected_user = users[index - 1]
+                        users.remove(selected_user)
+                        with user_file.open("w", encoding="utf-8") as f:
+                            json.dump(user_data, f, ensure_ascii=False, indent=4)
+                        await event.send(event.plain_result("✅ 账号删除成功"))
+                        controller.stop()
+                        return
+                try:
+                    await delete_waiter(event)
+                except TimeoutError as _:
+                    logger.warning("选择超时！")
+                    await event.send(event.plain_result("❌ 选择超时，终止运行"))
+        except Exception as e:
+            logger.error(f"读取用户数据失败: {e}")
+            await event.send(event.plain_result("❌ 读取数据失败"))
+            return
+
+    @command("签到")
+    async def sign(self, event: AstrMessageEvent):
+        """"""
+        #读取文件
+        data_dir_str = get_astrbot_data_path()
+        plugin_data_path = Path(data_dir_str) / "plugin_data" / self.name
+        user_dir = plugin_data_path / "users"
+        user_id = event.get_sender_id()
+        user_file = user_dir / f"{user_id}.json"
+        if not user_file.exists():
+            await event.send(event.plain_result("❌ 未找到绑定数据"))
+            return
+        try:
+            with user_file.open("r", encoding="utf-8") as f:
+                user_data = json.load(f)
+                users = user_data.get("users", [])
+                if not users or len(users) == 0:
+                    await event.send(event.plain_result("❌ 未找到绑定数据"))
+                    return
+                for user in users:
+                    #获取角色信息
+                    account = decrypt_data(user["account"])
+                    role_id = decrypt_data(user["role_id"])
+                    users_data = await get_server(account)  # 获取最新的角色信息，更新info显示
+                    if users_data is None or len(users_data) == 0:
+                        logger.error(f"获取数据失败，账号: {account}")
+                        continue
+                    for user_data in users_data:
+                        if user_data["role_id"] == role_id:
+                            #编码数据
+                            payload = convert_to_query_bytes(user_data,account)
+                            #绑定角色
+                            result = await binds_account(self.headers, payload)
+                            if result["code"] == 200:
+                                sign_result = await sign_request(self.headers)
+                                await event.send(
+                                    event.plain_result(
+                                        f"✅ {user['info']} 签到成功: {sign_result.get('message')}"
+                                    )
+                                )
+                                return
+                            else:
+                                logger.error(f"绑定失败，账号: {account}, 角色: {user['info']}, 错误信息: {result.get('message')}")
+                    logger.error(f"未找到匹配的角色信息，账号: {account}, 角色ID: {role_id}")
+        except Exception as e:
+            logger.error(f"读取用户数据失败: {e}")
+            await event.send(event.plain_result("❌ 读取数据失败"))
+            return
 
     # ==================== LLM 工具 ====================
 

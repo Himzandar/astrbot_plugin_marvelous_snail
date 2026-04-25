@@ -1,15 +1,17 @@
 # utils.py
+import base64
+import json
+import urllib.parse
+
+from cryptography.fernet import Fernet
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 
 from astrbot.api.event import AstrMessageEvent
 from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event import (
     AiocqhttpMessageEvent,
 )
 
-import base64
-from cryptography.fernet import Fernet
-from cryptography.hazmat.primitives import hashes
-from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
-import os
 
 def cron_to_human(cron: str) -> str:
     """将 5 段 cron（分 时 日 月 周）转换为中文易读描述
@@ -122,3 +124,37 @@ def encrypt_data(text: str) -> str:
 def decrypt_data(token: str) -> str:
     """解密数据，返回解密后的字符串"""
     return get_fernet().decrypt(token.encode()).decode()
+
+def convert_to_query_bytes(data, account, page_id=1):
+    """
+    将输入字典转换为类似示例的 URL 查询字节串
+    :param data: 原始数据字典
+    :param account: 外部传入的手机号（示例中固定为 "1234567890"）
+    :param page_id: 固定页号，默认为 1
+    :return: bytes 类型的查询字符串
+    """
+    # 构建基础参数
+    params = {
+        "account": account,
+        "page_id": str(page_id),
+        "game_id": str(data["game_id"]),
+        "role_id": data["role_id"],
+        "role_name": data["role_name"],
+        "server_id": str(data["server_id"]),
+        "server_name": data["server_name"],
+        "type": data["platform"],          # 示例中 type 取自 platform
+        "platform": data["platform"],
+    }
+    # 处理 extra 字段：转换为紧凑 JSON 字符串
+    extra_data = data["extra"].copy()
+    #将 score 统一转为字符串
+    if "score" in extra_data:
+        extra_data["score"] = str(extra_data["score"])
+
+    # 紧凑 JSON，无空格
+    params["extra"] = json.dumps(extra_data, separators=(",", ":"))
+
+    # 进行 URL 编码（使用 quote 而非 quote_plus，保留空格为 %20）
+    query_string = urllib.parse.urlencode(params, quote_via=urllib.parse.quote)
+    return query_string.encode("utf-8")
+
