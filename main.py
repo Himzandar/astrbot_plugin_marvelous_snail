@@ -1094,17 +1094,17 @@ class MarvelousSnailPlugin(Star):
                         account = decrypt_data(user["account"])
                         role_id = decrypt_data(user["role_id"])
                         info = user.get("info", "")
-                        users_data = await get_server(account)  # 获取最新的角色信息，更新info显示
-                        if users_data is None or len(users_data) == 0:
+                        users_server_data = await get_server(account)  # 获取最新的角色信息，更新info显示
+                        if users_server_data is None or len(users_server_data) == 0:
                             send_info += f"\n{info}:获取数据失败，无法执行签到"
                             logger.error(f"获取数据失败，账号: {account}")
                             continue
                         info = user.get("info", "")
-                        for user_data in users_data:
-                            if user_data["role_id"] == role_id:
-                                user["info"] = user_data.get("info", info)  # 更新角色信息显示
+                        for user_server_data in users_server_data:
+                            if user_server_data["role_id"] == role_id:
+                                user["info"] = user_server_data.get("info", info)  # 更新角色信息显示
                                 #编码数据
-                                payload = convert_to_query_bytes(user_data,account)
+                                payload = convert_to_query_bytes(user_server_data,account)
                                 #绑定角色
                                 result = await binds_account(self.headers, payload)
                                 if result["code"] == 200:
@@ -1131,10 +1131,11 @@ class MarvelousSnailPlugin(Star):
                     logger.error(f"发送消息给用户 {umo} 失败: {e}")
                 umo = None
             #更新文件数据写入
-            user_data["users"] = writer_data
-            user_data["num"] = len(writer_data)
+            writer = {"num": 0, "users": []}
+            writer["users"] = writer_data
+            writer["num"] = len(writer_data)
             with user_file.open("w", encoding="utf-8") as f:
-                json.dump(user_data, f, ensure_ascii=False, indent=4)
+                json.dump(writer, f, ensure_ascii=False, indent=4)
             #一个用户签到结束，休眠1-3分钟，防止请求过快被封IP，间隔随机1-3分钟
             random_factor = random.uniform(60, 180)
             delay = max(60, random_factor)  # 确保间隔至少为1分钟
