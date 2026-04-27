@@ -999,7 +999,7 @@ class MarvelousSnailPlugin(Star):
                     if users_data is None or len(users_data) == 0:
                         logger.error(f"获取数据失败，账号: {account}")
                         continue
-                    bool flag = False
+                    flag = False
                     for user_data in users_data:
                         if user_data["role_id"] == role_id:
                             #编码数据
