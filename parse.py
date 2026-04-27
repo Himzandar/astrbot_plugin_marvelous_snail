@@ -10,7 +10,7 @@ class Parse:
     def __init__(self):
         pass
 
-    async def get_author_all_title_and_link(self, plugin_data_path: Path,author: str):
+    async def get_author_all_title_and_link(self, plugin_data_path: Path, author: str):
         """获取作者的所有文章标题+简介和链接
         Args:
             plugin_data_path: 插件数据路径
@@ -19,26 +19,40 @@ class Parse:
             包含标题+简介和链接的字典，键为标题+简介，值为链接
         """
         #读取作者.json文件
-        selected_author = author+".json"
+        selected_author = f"{author}.json"
+        author_file = plugin_data_path / selected_author
+        if not author_file.exists():
+            logger.warning(f"作者缓存文件不存在: {selected_author}")
+            return {}
+
         # 读取作者对应的文章数据
         try:
-            with open(plugin_data_path / selected_author, encoding="utf-8") as f:
+            with author_file.open(encoding="utf-8") as f:
                 author_data = json.load(f)
         except Exception as e:
             logger.error(f"读取 {selected_author} 失败: {e}")
-            return None
+            return {}
+
+        if not isinstance(author_data, dict):
+            logger.error(f"作者缓存文件格式无效: {selected_author}")
+            return {}
+
         num = author_data.get("num", 0)
         articles = author_data.get("articles", [])
         if num == 0 or not articles:
             logger.warning(f"作者 {author} 没有文章数据")
-            return None
+            return {}
         #这里要把标题和简介拼接在一起，并且要与链接关联起来，方便后续发送消息时使用
         result = {}
         for article in articles:
+            if not isinstance(article, dict):
+                continue
             title = article.get("title", "")
             digest = article.get("digest", "")
             link = article.get("link", "")
-            result[title+"digest:"+digest] = link
+            if not title or not link:
+                continue
+            result[f"{title}digest:{digest}"] = link
         return result
 
     def chinese_relevance_score(self, title, query):
@@ -66,6 +80,10 @@ class Parse:
             query: 查询字符串
         Returns:            按相关度排序的结果列表，元素为 (标题, 链接, 相关度分数) 的元组
         """
+        if not isinstance(data_dict, dict):
+            logger.warning("搜索攻略时未获得有效的文章索引")
+            return []
+
         results = []
         for title, value in data_dict.items():
             score = self.chinese_relevance_score(title, query)
@@ -74,25 +92,30 @@ class Parse:
         results.sort(key=lambda x: x[2], reverse=True)
         return results
 
-    async def parse_title_send_link(self,plugin_data_path: Path, author: str,parse_str:str):
+    async def parse_title_send_link(
+        self, plugin_data_path: Path, author: str, parse_str: str
+    ):
         """解析文章标题并发送链接
         Args:
             plugin_data_path: 插件数据路径
             author: 作者名称
             parse_str: 要解析的字符串
         """
-        ret = {
-            "msg": "",
-            "data": {}
-        }
+        ret = {"msg": "", "data": {}}
         articles = await self.get_author_all_title_and_link(plugin_data_path, author)
+        if not articles:
+            msg = f"{author} 暂无可搜索的攻略数据"
+            logger.info(msg)
+            return {"msg": msg, "data": {}}
+
         data = self.search_chinese_relevance(articles, parse_str)
         if data is None or len(data) == 0:
             msg = f"{author} 没有{parse_str}相关的攻略"
+            logger.info(msg)
             return {"msg": msg, "data": {}}
         ret["msg"] = f"{author}:{parse_str}相关攻略，共{len(data)}条，请回复编号选择："
 
-        for title, link, score in data:
+        for title, link, _score in data:
             ret["data"][title] = link
         return ret
 

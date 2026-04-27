@@ -7,6 +7,7 @@ from cryptography.fernet import Fernet
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 
+from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent
 from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event import (
     AiocqhttpMessageEvent,
@@ -90,17 +91,21 @@ async def send_msg(event: AstrMessageEvent, msg: str) -> int | None:
     Returns:
         发送平台如果不是 Aiocqhttp 则返回 None，如果是 Aiocqhttp 且发送失败则返回 None ，否则返回消息ID
     """
-    if isinstance(event, AiocqhttpMessageEvent):
-        payloads: dict = {"message": [{"type": "text", "data": {"text": msg}}]}
-        if event.is_private_chat():
-            payloads["user_id"] = event.get_sender_id()
-            result = await event.bot.api.call_action("send_private_msg", **payloads)
-        else:
-            payloads["group_id"] = event.get_group_id()
-            result = await event.bot.api.call_action("send_group_msg", **payloads)
-        return result.get("message_id")
-    else:
+    try:
+        if isinstance(event, AiocqhttpMessageEvent):
+            payloads: dict = {"message": [{"type": "text", "data": {"text": msg}}]}
+            if event.is_private_chat():
+                payloads["user_id"] = event.get_sender_id()
+                result = await event.bot.api.call_action("send_private_msg", **payloads)
+            else:
+                payloads["group_id"] = event.get_group_id()
+                result = await event.bot.api.call_action("send_group_msg", **payloads)
+            return result.get("message_id")
+
         await event.send(event.plain_result(msg))
+        return None
+    except Exception as exc:
+        logger.error(f"发送消息失败: {exc}")
         return None
 
 # ====================== AES 加密工具（个保法合规必备） ======================
@@ -133,6 +138,21 @@ def convert_to_query_bytes(data, account, page_id=1):
     :param page_id: 固定页号，默认为 1
     :return: bytes 类型的查询字符串
     """
+    if not isinstance(data, dict):
+        raise ValueError("角色数据格式无效")
+
+    required_fields = [
+        "game_id",
+        "role_id",
+        "role_name",
+        "server_id",
+        "server_name",
+        "platform",
+    ]
+    missing_fields = [field for field in required_fields if not data.get(field)]
+    if missing_fields:
+        raise ValueError(f"角色数据缺少必要字段: {', '.join(missing_fields)}")
+
     # 构建基础参数
     params = {
         "account": account,
@@ -146,7 +166,8 @@ def convert_to_query_bytes(data, account, page_id=1):
         "platform": data["platform"],
     }
     # 处理 extra 字段：转换为紧凑 JSON 字符串
-    extra_data = data["extra"].copy()
+    extra_raw = data.get("extra")
+    extra_data = extra_raw.copy() if isinstance(extra_raw, dict) else {}
     #将 score 统一转为字符串
     if "score" in extra_data:
         extra_data["score"] = str(extra_data["score"])
