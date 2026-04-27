@@ -999,6 +999,7 @@ class MarvelousSnailPlugin(Star):
                     if users_data is None or len(users_data) == 0:
                         logger.error(f"获取数据失败，账号: {account}")
                         continue
+                    bool flag = False
                     for user_data in users_data:
                         if user_data["role_id"] == role_id:
                             #编码数据
@@ -1012,10 +1013,12 @@ class MarvelousSnailPlugin(Star):
                                         f"✅ {user['info']} 签到成功: {sign_result.get('message')}"
                                     )
                                 )
-                                continue
+                                flag = True
+                                break
                             else:
                                 logger.error(f"绑定失败，账号: {account}, 角色: {user['info']}, 错误信息: {result.get('message')}")
-                    logger.error(f"未找到匹配的角色信息，账号: {account}, 角色ID: {role_id}")
+                    if not flag:
+                        logger.error(f"未找到匹配的角色信息，账号: {account}, 角色ID: {role_id}")
         except Exception as e:
             logger.error(f"读取用户数据失败: {e}")
             await event.send(event.plain_result("❌ 读取数据失败"))
@@ -1142,6 +1145,34 @@ class MarvelousSnailPlugin(Star):
             await asyncio.sleep(delay)
             logger.info(f"用户 {user_id} 的定时签到已完成，休眠{delay}秒后继续下一个用户签到")
 
+    @command("账号统计")
+    async def account_statistics(self, event: AstrMessageEvent):
+        """账号统计功能，统计已绑定账号的数量和信息
+        """
+        #读取文件
+        data_dir_str = get_astrbot_data_path()
+        plugin_data_path = Path(data_dir_str) / "plugin_data" / self.name
+        user_dir = plugin_data_path / "users"
+        total_accounts = 0
+        counts = 0
+        stats_info = "账号统计信息:"
+        if not user_dir.exists():
+            yield event.plain_result("❌ 未找到绑定数据")
+            return
+        try:
+            for user_file in user_dir.glob("*.json"):
+                with user_file.open("r", encoding="utf-8") as f:
+                    user_data = json.load(f)
+                    num = user_data.get("num", 0)
+                    counts += num
+                total_accounts += 1
+            stats_info += f"\n总用户数: {total_accounts}"
+            stats_info += f"\n总账号数: {counts}"
+            yield event.plain_result(stats_info)
+        except Exception as e:
+            logger.error(f"读取用户数据失败: {e}")
+            yield event.plain_result("❌ 读取数据失败")
+            return
     # ==================== LLM 工具 ====================
 
     # @llm_tool(name="search_strategy")
