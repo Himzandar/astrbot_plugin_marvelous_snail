@@ -1305,7 +1305,7 @@ class MarvelousSnailPlugin(Star):
                                         f"\n{user['info']}:签到成功, "
                                         f"{sign_result.get('message', '未知结果')}"
                                     )
-                                    #休眠3-5秒，防止请求过快被封IP，间隔随机3-5秒
+                                    #休眠3-5秒，防止请求过快被封IP，间隔随机8-15秒
                                     random_factor = random.uniform(8, 15)
                                     delay = max(3, random_factor)  # 确保间隔至少为3秒
                                     await asyncio.sleep(delay)
