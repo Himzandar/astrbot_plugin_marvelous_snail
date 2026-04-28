@@ -1306,7 +1306,7 @@ class MarvelousSnailPlugin(Star):
                                         f"{sign_result.get('message', '未知结果')}"
                                     )
                                     #休眠3-5秒，防止请求过快被封IP，间隔随机3-5秒
-                                    random_factor = random.uniform(3, 5)
+                                    random_factor = random.uniform(8, 15)
                                     delay = max(3, random_factor)  # 确保间隔至少为3秒
                                     await asyncio.sleep(delay)
                                 else:
@@ -1343,11 +1343,7 @@ class MarvelousSnailPlugin(Star):
             except Exception as e:
                 logger.error(f"写回用户 {user_id} 的签到数据失败: {e}")
                 continue
-            #一个用户签到结束，休眠1-3分钟，防止请求过快被封IP，间隔随机1-3分钟
-            random_factor = random.uniform(60, 180)
-            delay = max(60, random_factor)  # 确保间隔至少为1分钟
-            await asyncio.sleep(delay)
-            logger.info(f"用户 {user_id} 的定时签到已完成，休眠{delay}秒后继续下一个用户签到")
+            logger.info(f"用户 {user_id} 的定时签到已完成")
 
     @command("账号统计")
     async def account_statistics(self, event: AstrMessageEvent):
