@@ -1413,14 +1413,12 @@ class MarvelousSnailPlugin(Star):
         """保存数据命令，手动触发将内存中的数据写入本地文件，确保数据持久化
         """
         #先保存文章推送的用户数据
-        users = await self.get_kv_data("users", {}) or {}
+        users = await self.get_kv_data("users_sign", {}) or {}
         data_content = {"datas":[]}
         for key, value in users.items():
-            if value.get("enabled", False) is not True:
-                continue
             data = value.get("umo", "")
             data_content["datas"].append(data)
-        self.write_file("push_datas","strategy.json",data_content)
+        self.write_file("push_datas","sign.json",data_content)
         yield event.plain_result("✅ 数据已保存")
 
     def read_file(self,dir_name:str,file_name:str):
