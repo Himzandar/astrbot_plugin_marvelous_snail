@@ -34,6 +34,7 @@ from .utils import (
     cron_to_human,
     decrypt_data,
     encrypt_data,
+    get_week,
     send_msg,
 )
 
@@ -724,6 +725,87 @@ class MarvelousSnailPlugin(Star):
             logger.error("选择发生错误" + str(e))
         event.stop_event()
 
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    @zqwn.command("获取文章")
+    async def get_(self, event: AstrMessageEvent, author_in: str):
+        """获取指定作者的所有文章并保存到本地 JSON 文件,需要管理员权限
+        Args:
+            event: 消息事件对象
+            author_in: 作者名称
+        """
+        if event.get_message_type() != PlatformMessageType.FRIEND_MESSAGE:
+            yield event.plain_result(
+                "⚠️ 该指令仅限私聊使用。\n请私聊发送“最强蜗牛 攻略推送列表”。"
+            )
+            return
+        authors = await self.get_kv_data("authors", {})  # 这个是用来获取fakeid
+        write_data = []
+        fakeid = authors.get(author_in, "")  # type: ignore
+        logger.info(f"正在获取作者 {author_in} fakeid 为 {fakeid} 的文章列表...")
+        begin = 0  # 起始索引
+        num = 0  # 记录有效文章数量
+        while True:
+            async with aiohttp.ClientSession() as session:
+                headers = {"X-Auth-Key": self.config.get("exporter_auth_key")}
+                params = {"fakeid": fakeid, "begin": begin, "size": 20}
+                try:
+                    async with session.get(
+                        f"{self.config.get('exporter_api_url')}/api/public/v1/article",
+                        headers=headers,
+                        params=params,
+                    ) as resp:
+                        try:
+                            data = await resp.json()
+                            base_resp = data.get("base_resp")
+                            if base_resp and base_resp.get("err_msg") == "ok":
+                                # 处理成功响应
+                                articles = data.get("articles")
+                                logger.info(
+                                    f"第{begin} 获取到 {len(articles) if articles else 0} 篇文章"
+                                )
+                                if articles is None or len(articles) == 0:
+                                    break
+                                for article in articles:
+                                    is_deleted = article.get("is_deleted", False)
+                                    if is_deleted:  # 如果文章被删除了，就不保存
+                                        continue
+                                    write_data.append(article)  # 保存
+                                    num += 1
+                            else:
+                                # 处理失败响应
+                                logger.error(
+                                    f"❌ 获取{author_in}的文章失败: {data.get('base_resp').get('err_msg')}"
+                                )
+                            begin += 20
+                        except (ValueError, KeyError):
+                            logger.error("API 响应解析失败")
+                            break
+                except Exception:
+                    logger.error("获取公众号文章失败")
+                    break
+            logger.debug(f"第{begin}请求，已获取 {num} 篇有效文章")
+            # 休眠防止请求过快被封IP，间隔随机3-5秒
+            random_factor = random.uniform(3, 5)
+            delay = max(5, random_factor)  # 确保间隔至少为5秒
+            await asyncio.sleep(delay)
+        logger.info(f"共获取到 {num} 篇有效文章")
+
+        # 保存数据到本地JSON文件
+        # 1. 获取字符串路径，并显式转换为 Path 对象
+        data_dir_str = get_astrbot_data_path()
+        plugin_data_path = Path(data_dir_str) / "plugin_data" / self.name
+
+        # 2. 创建目录 (此时 plugin_data_path 是 Path 对象，所以 .mkdir() 可用)
+        plugin_data_path.mkdir(parents=True, exist_ok=True)
+        authors_file = plugin_data_path / f"{author_in}.json"
+        data = {"num": num, "articles": write_data}
+        # 3.尝试写入文件
+        try:
+            with authors_file.open("w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=4)
+        except Exception as e:
+            logger.error(f"写入 {author_in}.json 失败: {e}")
+
     async def get_code(self, link: str):
         """解析密令
         Args:
@@ -1213,35 +1295,42 @@ class MarvelousSnailPlugin(Star):
             enabled: "开启" 或 "关闭"
         """
         #群聊屏蔽
-        group_id = getattr(event.message_obj, "group_id", None)
-        if group_id and group_id != 0:
-            yield event.plain_result("❌ 群聊暂不支持定时签到信息推送")
+        if event.get_message_type() != PlatformMessageType.FRIEND_MESSAGE:
+            yield event.plain_result(
+                "⚠️ 该指令仅限私聊使用。\n请私聊发送“定时签到推送 开启”或“定时签到推送 关闭”。"
+            )
             return
         #获取用户ID
-        uid = event.get_sender_id()
-        uid = uid.replace("/", "_")
-        users = await self.get_kv_data("users_sign", {}) or {}
-        if not isinstance(users, dict):
-            logger.warning("users_sign 推送配置格式异常，已重置为空字典")
-            users = {}
+        user_id = event.get_sender_id()
+        user_id = user_id.replace("/", "_")
+        data = self.read_file("push_datas", "sign.json")
+        if not data:
+            data = {"datas": []}
+        users = data.get("datas", [])
+        uids = {}
+        for user in users:
+            uid = user.split(":")[-1]
+            uids[uid] = user
+
         if enabled not in ["开启", "关闭"]:
             yield event.plain_result(
                 "❌ 参数错误，请使用：定时签到推送 开启 或 定时签到推送 关闭"
             )
             return
         if enabled == "开启":
-            user_info = {
-                "umo": event.unified_msg_origin,  # 保存统一会话ID
-            }
-            users[uid] = user_info  # type: ignore
-            await self.put_kv_data("users_sign", users)
-            yield event.plain_result(f"✅ {uid} 已开启定时签到推送")
+            if uids.get(user_id) is not None:
+                yield event.plain_result(f"✅ {user_id} 已经开启定时签到推送，无需重复操作")
+                return
+            data["datas"].append(event.unified_msg_origin)
+            yield event.plain_result(f"✅ {user_id} 已开启定时签到推送")
         else:
             #关闭直接删除用户的推送信息
-            if users.get(uid) is not None:  # type: ignore
-                del users[uid] # type: ignore
-            await self.put_kv_data("users_sign", users)
-            yield event.plain_result(f"✅ {uid} 已关闭定时签到推送")
+            if uids.get(user_id) is None:
+                yield event.plain_result(f"✅ {user_id} 已经关闭定时签到推送，无需重复操作")
+                return
+            data["datas"].remove(event.unified_msg_origin)
+            yield event.plain_result(f"✅ {user_id} 已关闭定时签到推送")
+        self.write_file("push_datas", "sign.json", data)
 
     async def auto_sign_in(self):
         """定时签到功能，查询已绑定的角色，选择后执行签到
@@ -1251,11 +1340,15 @@ class MarvelousSnailPlugin(Star):
             return
 
         #获取推送信息列表
-        users_sign = await self.get_kv_data("users_sign", {}) or {}
-        if not isinstance(users_sign, dict):
-            logger.warning("users_sign 推送配置格式异常，定时签到将按空配置处理")
-            users_sign = {}
-        umo = None
+        data = self.read_file("push_datas", "sign.json")
+        if not data:
+            logger.info("未找到定时签到推送数据文件，跳过定时签到任务")
+            return
+        users_sign = data.get("datas", [])
+        uids = {}
+        for user in users_sign:
+            uid = user.split(":")[-1]
+            uids[uid] = user
         #读取文件
         data_dir_str = get_astrbot_data_path()
         plugin_data_path = Path(data_dir_str) / "plugin_data" / self.name
@@ -1269,8 +1362,9 @@ class MarvelousSnailPlugin(Star):
             user_file = user_dir / f"{user_id}.json"
             send_info = "【定时签到推送】"
             writer_data = []
-            if users_sign.get(user_id) is not None:  # type: ignore
-                umo = users_sign[user_id].get("umo")  # type: ignore
+            umo = None
+            if uids.get(user_id):
+                umo = uids[user_id]
             if not user_file.exists():
                 send_info += "\n未找到绑定数据，无法执行签到"
                 if umo:
@@ -1358,9 +1452,12 @@ class MarvelousSnailPlugin(Star):
             except Exception as e:
                 logger.error(f"读取用户 {user_id} 的数据失败: {e}")
                 continue
+            send_info += "\n【今日签到奖励】"
             #发送签到结果
             if umo:
-                message_chain = MessageChain().message(send_info)  # type: ignore
+                weeks = ["Monday.png", "Tuesday.png", "Wednesday.png", "Thursday.png", "Friday.png", "Saturday.png", "Sunday.png"]
+                img_path = get_astrbot_data_path() + f"/plugins/{self.name}/week/{weeks[get_week()]}"
+                message_chain = MessageChain().message(send_info).file_image(img_path)
                 try:
                     await self.context.send_message(umo, message_chain)  # type: ignore
                     logger.info(f"已发送消息给用户 {umo}: {send_info}")
@@ -1408,19 +1505,6 @@ class MarvelousSnailPlugin(Star):
             yield event.plain_result("❌ 读取数据失败")
             return
 
-    @command("保存")
-    async def save_data(self, event: AstrMessageEvent):
-        """保存数据命令，手动触发将内存中的数据写入本地文件，确保数据持久化
-        """
-        #先保存文章推送的用户数据
-        users = await self.get_kv_data("users_sign", {}) or {}
-        data_content = {"datas":[]}
-        for key, value in users.items():
-            data = value.get("umo", "")
-            data_content["datas"].append(data)
-        self.write_file("push_datas","sign.json",data_content)
-        yield event.plain_result("✅ 数据已保存")
-
     def read_file(self,dir_name:str,file_name:str):
         """打开文件，返回文件内容
         Args:
@@ -1467,17 +1551,3 @@ class MarvelousSnailPlugin(Star):
         except Exception as e:
             logger.error(f"写入文件 {file_path} 失败: {e}")
             return False
-    # ==================== LLM 工具 ====================
-
-    # @llm_tool(name="search_strategy")
-    # async def search_strategy(
-    #     self,
-    #     event: AstrMessageEvent,
-    #     parse_str: str,
-    # ):
-    #     """将你分析得到的提示词作为参数调用 get_strategy 方法，后续由get_strategy流程接管运行即可
-    #     Args:
-    #         parse_str(string): 搜索提示词,例如: "搜索最强蜗牛源兽攻略"中的"源兽"
-    #     """
-    #     await self.get_strategy(event, parse_str=parse_str)
-    #     return "OK. The strategy workflow has been executed. Please do not generate any further text response."
