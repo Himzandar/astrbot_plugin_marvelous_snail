@@ -11,9 +11,15 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 
 from astrbot.api import AstrBotConfig, logger
-from astrbot.api.event import AstrMessageEvent, MessageChain
-from astrbot.api.event.filter import EventMessageType, command, event_message_type
+from astrbot.api.event import AstrMessageEvent, MessageChain, filter
+from astrbot.api.event.filter import (
+    EventMessageType,
+    command,
+    command_group,
+    event_message_type,
+)
 from astrbot.api.star import Context, Star
+from astrbot.core.platform import MessageType as PlatformMessageType
 from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event import (
     AiocqhttpMessageEvent,
 )
@@ -119,15 +125,28 @@ class MarvelousSnailPlugin(Star):
             and auth_key.strip()
         )
 
-    @command("zqwn")
+    @command_group("最强蜗牛")
+    def zqwn(self):
+        """最强蜗牛攻略相关功能
+        搜索，添加，删除，查看攻略作者
+        """
+        pass
+
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    @zqwn.command("作者搜索")
     async def search_public_account(
         self, event: AstrMessageEvent, keyword: str = "最强蜗牛", size: int = 5
     ):
-        """搜索公众号作者，默认搜索“最强蜗牛”，返回前5个结果
+        """搜索作者，默认搜索“最强蜗牛”，返回前5个结果
         Args:
             keyword: 搜索关键词，默认为“最强蜗牛”
             size: 返回结果数量，默认为5
         """
+        if event.get_message_type() != PlatformMessageType.FRIEND_MESSAGE:
+            yield event.plain_result(
+                "⚠️ 该指令仅限私聊使用。\n请私聊发送“最强蜗牛 作者搜索”。"
+            )
+            return
         if not self._check_config():
             yield event.plain_result("❌ 插件未配置 API 地址或密钥，请联系管理员")
             return
@@ -179,12 +198,18 @@ class MarvelousSnailPlugin(Star):
             except Exception as e:
                 logger.error(f"搜索失败: {e}")
 
-    @command("zqwn_add")
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    @zqwn.command("作者添加")
     async def add_saved_account(self, event: AstrMessageEvent, index: str):
         """将搜索结果中指定索引的公众号作者添加到保存列表
         Args:
             index: 搜索结果中的索引
         """
+        if event.get_message_type() != PlatformMessageType.FRIEND_MESSAGE:
+            yield event.plain_result(
+                "⚠️ 该指令仅限私聊使用。\n请私聊发送“最强蜗牛 作者添加”。"
+            )
+            return
         authors = await self.get_kv_data("authors", {})
         try:
             data = self.authors.get(int(index))
@@ -200,12 +225,18 @@ class MarvelousSnailPlugin(Star):
         await self.put_kv_data("authors", authors)
         yield event.plain_result(f"✅ 已添加作者: {name}")
 
-    @command("zqwn_del")
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    @zqwn.command("作者删除")
     async def del_saved_account(self, event: AstrMessageEvent, name: str):
         """从保存列表中删除指定名字的公众号作者
         Args:
             name: 作者名称
         """
+        if event.get_message_type() != PlatformMessageType.FRIEND_MESSAGE:
+            yield event.plain_result(
+                "⚠️ 该指令仅限私聊使用。\n请私聊发送“最强蜗牛 作者删除”。"
+            )
+            return
         authors = await self.get_kv_data("authors", {})
         articles = await self.get_kv_data("articles", {})
         if name not in authors.keys():  # type: ignore
@@ -222,9 +253,15 @@ class MarvelousSnailPlugin(Star):
         await self.put_kv_data("authors", authors)
         yield event.plain_result(f"✅ 已删除作者: {name}")
 
-    @command("zqwn_list")
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    @zqwn.command("作者列表")
     async def list_saved_accounts(self, event: AstrMessageEvent):
         """列出已保存的公众号作者"""
+        if event.get_message_type() != PlatformMessageType.FRIEND_MESSAGE:
+            yield event.plain_result(
+                "⚠️ 该指令仅限私聊使用。\n请私聊发送“最强蜗牛 作者列表”。"
+            )
+            return
         authors = await self.get_kv_data("authors", {})
         if not authors or len(authors) == 0:
             yield event.plain_result("❌ 请先使用 zqwn 命令搜索公众号作者")
@@ -425,32 +462,30 @@ class MarvelousSnailPlugin(Star):
             message: 要发送的消息内容
         """
         try:
-            users = await self.get_kv_data("users", {}) or {}
-            if not isinstance(users, dict):
-                logger.warning("users 推送配置格式异常，已跳过本次消息发送")
-                return
+            data = self.read_file("push_datas","strategy.json")
+            users = data.get("datas", []) if data else []
             if not users or len(users) == 0:
                 logger.warning("未配置推送用户，无法发送私聊消息")
                 return
-            for uid, user_info in users.items():
-                if not user_info.get("enabled", False):
-                    continue
-                umo = user_info.get("umo")
-                if not umo:
-                    logger.warning(f"用户 {uid} 未配置 umo，跳过发送")
-                    continue
+            for user in users:
                 message_chain = MessageChain().message(message)
                 try:
-                    await self.context.send_message(umo, message_chain)  # type: ignore
-                    logger.info(f"已发送消息给用户 {uid}: {message}")
+                    await self.context.send_message(user, message_chain)  # type: ignore
+                    logger.info(f"已发送消息给用户 {user}: {message}")
                 except Exception as e:
-                    logger.error(f"发送消息给用户 {uid} 失败: {e}")
+                    logger.error(f"发送消息给用户 {user} 失败: {e}")
         except Exception as e:
             logger.error(f"发送消息失败: {e}")
 
-    @command("获取推送列表")
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    @zqwn.command("攻略推送列表")
     async def get_push_list(self, event: AstrMessageEvent):
-        """获取推送列表"""
+        """攻略推送列表"""
+        if event.get_message_type() != PlatformMessageType.FRIEND_MESSAGE:
+            yield event.plain_result(
+                "⚠️ 该指令仅限私聊使用。\n请私聊发送“最强蜗牛 攻略推送列表”。"
+            )
+            return
         users = await self.get_kv_data("users", {}) or {}
         if not isinstance(users, dict):
             logger.warning("users 推送配置格式异常，无法获取推送列表")
@@ -462,13 +497,15 @@ class MarvelousSnailPlugin(Star):
         push_list = []
         for uid, user_info in users.items():
             if user_info.get("enabled", False):
-                push_list.append(uid)
+                push_list.append("\n"+user_info.get("umo", "未知"))
         if push_list:
-            yield event.plain_result(f"✅ 当前推送用户: {', '.join(push_list)}")
+            yield event.plain_result(f"✅ 当前推送用户: {''.join(push_list)}")
         else:
             yield event.plain_result("❌ 没有开启自动推送的用户")
 
-    @command("推送zqwn")
+
+
+    @zqwn.command("攻略推送")
     async def push_zqwn(self, event: AstrMessageEvent, enabled: str):
         """设置推送列表/开启或关闭推送
         Args:
@@ -479,31 +516,28 @@ class MarvelousSnailPlugin(Star):
         uid = group_id
         if not group_id or group_id == 0:
             uid = user_name
-        users = await self.get_kv_data("users", {}) or {}
-        if not isinstance(users, dict):
-            logger.warning("users 推送配置格式异常，已重置为空字典")
-            users = {}
+        #读取推送文件夹
+        data = self.read_file("push_datas","strategy.json")
+        if not data:
+            data = {"datas": []}
         if enabled not in ["开启", "关闭"]:
             yield event.plain_result(
-                "❌ 参数错误，请使用：推送zqwn 开启 或 推送zqwn 关闭"
+                "❌ 参数错误，请使用：最强蜗牛 攻略推送 开启 或 最强蜗牛 攻略推送 关闭"
             )
             return
         if enabled == "开启":
-            user_info = {
-                "umo": event.unified_msg_origin,  # 保存统一会话ID
-                "enabled": True,
-            }
-            users[uid] = user_info  # type: ignore
-            await self.put_kv_data("users", users)
+            if event.unified_msg_origin in data["datas"]:
+                yield event.plain_result(f"✅ {uid} 已经开启自动推送，无需重复设置")
+                return
+            data["datas"].append(event.unified_msg_origin)
             yield event.plain_result(f"✅ {uid} 已开启自动推送")
         else:
-            user_info = {
-                "umo": event.unified_msg_origin,  # 保存统一会话ID
-                "enabled": False,
-            }
-            users[uid] = user_info  # type: ignore
-            await self.put_kv_data("users", users)
+            if event.unified_msg_origin not in data["datas"]:
+                yield event.plain_result(f"✅ {uid} 已经关闭自动推送，无需重复设置")
+                return
+            data["datas"].remove(event.unified_msg_origin)
             yield event.plain_result(f"✅ {uid} 已关闭自动推送")
+        self.write_file("push_datas","strategy.json",data)
 
     async def save_config(self, authors: str, write_data: Any) -> None:
         """保存数据到本地 JSON 文件，按作者分类保存
@@ -550,7 +584,7 @@ class MarvelousSnailPlugin(Star):
         except Exception as e:
             logger.error(f"写入 {authors}.json 失败: {e}")
 
-    @command("搜索攻略")
+    @zqwn.command("搜索攻略")
     async def get_strategy(self, event: AstrMessageEvent, parse_str: str):
         """获取已保存的文章列表，选择后发送文章详情
         Args:
@@ -1373,6 +1407,68 @@ class MarvelousSnailPlugin(Star):
             logger.error(f"读取用户数据失败: {e}")
             yield event.plain_result("❌ 读取数据失败")
             return
+
+    @command("保存")
+    async def save_data(self, event: AstrMessageEvent):
+        """保存数据命令，手动触发将内存中的数据写入本地文件，确保数据持久化
+        """
+        #先保存文章推送的用户数据
+        users = await self.get_kv_data("users", {}) or {}
+        data_content = {"datas":[]}
+        for key, value in users.items():
+            if value.get("enabled", False) is not True:
+                continue
+            data = value.get("umo", "")
+            data_content["datas"].append(data)
+        self.write_file("push_datas","strategy.json",data_content)
+        yield event.plain_result("✅ 数据已保存")
+
+    def read_file(self,dir_name:str,file_name:str):
+        """打开文件，返回文件内容
+        Args:
+            dir_name: 文件夹名称
+            file_name: 文件名称
+        """
+        data_dir_str = get_astrbot_data_path()
+        plugin_data_path = Path(data_dir_str) / "plugin_data" / self.name
+        file_path = plugin_data_path / dir_name / file_name
+        if not file_path.exists():
+            logger.warning(f"文件 {file_path} 不存在")
+            return None
+        try:
+            with file_path.open("r", encoding="utf-8") as f:
+                content = json.load(f)
+                return content
+        except Exception as e:
+            logger.error(f"读取文件 {file_path} 失败: {e}")
+            return None
+
+    def write_file(self,dir_name:str,file_name:str,data:dict):
+        """写入文件，保存数据
+        Args:
+            dir_name: 文件夹名称
+            file_name: 文件名称
+            data: 需要写入的数据，字典格式
+        """
+        data_dir_str = get_astrbot_data_path()
+        plugin_data_path = Path(data_dir_str) / "plugin_data" / self.name
+        dir_path = plugin_data_path / dir_name
+        if not dir_path.exists():
+            try:
+                dir_path.mkdir(parents=True, exist_ok=True)
+                logger.info(f"已创建文件夹 {dir_path}")
+            except Exception as e:
+                logger.error(f"创建文件夹 {dir_path} 失败: {e}")
+                return False
+        file_path = dir_path / file_name
+        try:
+            with file_path.open("w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=4)
+            logger.info(f"已将数据写入 {file_path}")
+            return True
+        except Exception as e:
+            logger.error(f"写入文件 {file_path} 失败: {e}")
+            return False
     # ==================== LLM 工具 ====================
 
     # @llm_tool(name="search_strategy")
