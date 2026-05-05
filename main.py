@@ -48,6 +48,7 @@ class MarvelousSnailPlugin(Star):
         self.scheduler = AsyncIOScheduler()
         self.authors = {}
         self.headers = self._parse_headers_config(config.get("headers", "{}"))
+        self._fugitives_data_cache: dict[str, Any] | None = None
 
     def _parse_headers_config(self, raw_headers: Any) -> dict[str, Any]:
         """"""
@@ -87,7 +88,7 @@ class MarvelousSnailPlugin(Star):
 
     @staticmethod
     def _format_role_info(user_data: dict[str, Any]) -> str:
-        """Format role information defensively for logs and user-facing messages."""
+        """格式化角色信息，用于日志和用户显示"""
         extra = user_data.get("extra")
         score = "未知"
         if isinstance(extra, dict) and extra.get("score") is not None:
@@ -97,11 +98,49 @@ class MarvelousSnailPlugin(Star):
         role_name = user_data.get("role_name", "未知角色")
         return f"{server_name}-{role_name}:{score}"
 
+    def _load_fugitives_data(self) -> dict[str, Any] | None:
+        """读取特工逃犯数据文件，返回包含逃犯信息的字典"""
+        if self._fugitives_data_cache is not None:
+            return self._fugitives_data_cache
+
+        try:
+            data = self.read_file("fugitives", "fugitives.json")
+        except Exception as e:
+            logger.error(f"读取逃犯数据文件失败: {e}")
+            return None
+
+        if not isinstance(data, dict):
+            logger.error("逃犯数据文件格式错误，根节点必须是字典")
+            return None
+
+        self._fugitives_data_cache = data
+        return data
+
+    @staticmethod
+    def _format_fugitive_result(item: dict[str, Any]) -> str:
+        """格式化逃犯信息，用于日志和用户显示"""
+        lines = [
+            f"逃犯：{item.get('name', '未知')}",
+            f"等级：{item.get('level', '未知')}",
+        ]
+
+        ba_capture_reward = item.get("ba_capture_reward")
+        ba_revenge_reward = item.get("ba_revenge_reward")
+        bb_thanks_reward = item.get("bb_thanks_reward")
+
+        if ba_capture_reward:
+            lines.append(f"BA 抓住奖励：{ba_capture_reward}")
+        if ba_revenge_reward:
+            lines.append(f"BA 报复奖励：{ba_revenge_reward}")
+        if bb_thanks_reward:
+            lines.append(f"BB 感谢奖励：{bb_thanks_reward}")
+
+        return "\n".join(lines)
+
     async def initialize(self):
         """插件初始化"""
         logger.info("最强蜗牛插件已加载")
         self.parse = Parse()
-        # await self.get_saved_account()
         await self._start_auto_updata_job()
         if not self.scheduler.running:
             self.scheduler.start()
@@ -329,7 +368,7 @@ class MarvelousSnailPlugin(Star):
                                         # 发布了新文章
                                         updata_flag = True
                                         new_articles[name] = article
-                                        await self.save_config(name, article)
+                                        await self.save_strategy(name, article)
                                         logger.debug(
                                             f"✅ 作者 {name} old_aid: {old_aid} aid: {aid} 发布了新文章: {article.get('title')}\n链接: {link}"
                                         )
@@ -352,7 +391,7 @@ class MarvelousSnailPlugin(Star):
                                     # 发布了新文章
                                     updata_flag = True
                                     new_articles[name] = article
-                                    await self.save_config(name, article)
+                                    await self.save_strategy(name, article)
                                     logger.debug(
                                         f"✅ 作者 {name} aid: {aid} 发布了新文章: {article.get('title')}\n链接: {link}"
                                     )
@@ -504,8 +543,6 @@ class MarvelousSnailPlugin(Star):
         else:
             yield event.plain_result("❌ 没有开启自动推送的用户")
 
-
-
     @zqwn.command("攻略推送")
     async def push_zqwn(self, event: AstrMessageEvent, enabled: str):
         """设置推送列表/开启或关闭推送
@@ -540,15 +577,15 @@ class MarvelousSnailPlugin(Star):
             yield event.plain_result(f"✅ {uid} 已关闭自动推送")
         self.write_file("push_datas","strategy.json",data)
 
-    async def save_config(self, authors: str, write_data: Any) -> None:
-        """保存数据到本地 JSON 文件，按作者分类保存
+    async def save_strategy(self, authors: str, write_data: Any) -> None:
+        """保存攻略数据到本地 JSON 文件，按作者分类保存
         Args:
             authors: 作者名称
             write_data: 要保存的数据
         """
         # 1. 获取字符串路径，并显式转换为 Path 对象
         data_dir_str = get_astrbot_data_path()
-        plugin_data_path = Path(data_dir_str) / "plugin_data" / self.name
+        plugin_data_path = Path(data_dir_str) / "plugin_data" / self.name / "authors"
 
         # 2. 创建目录 (此时 plugin_data_path 是 Path 对象，所以 .mkdir() 可用)
         plugin_data_path.mkdir(parents=True, exist_ok=True)
@@ -597,7 +634,7 @@ class MarvelousSnailPlugin(Star):
         message_id = None
         page_id = 0
         data_dir_str = get_astrbot_data_path()
-        plugin_data_path = Path(data_dir_str) / "plugin_data" / self.name
+        plugin_data_path = Path(data_dir_str) / "plugin_data" / self.name / "authors"
         if not plugin_data_path.exists():
             logger.info("攻略缓存目录不存在，当前没有可查询数据")
             await event.send(event.plain_result("❌ 暂无数据存储"))
@@ -724,6 +761,50 @@ class MarvelousSnailPlugin(Star):
         except Exception as e:
             logger.error("选择发生错误" + str(e))
         event.stop_event()
+
+    @zqwn.command("特工逃犯")
+    async def get_fugitives(self, event: AstrMessageEvent, name: str):
+        """获取特工逃犯信息
+        Args:
+            name: 逃犯名称"""
+        keyword = name.strip()
+        if not keyword:
+            yield event.plain_result("❌ 请输入逃犯名称，例如：最强蜗牛 特工逃犯 白雪公主")
+            return
+
+        data = self._load_fugitives_data()
+        if not data:
+            yield event.plain_result("❌ 逃犯数据不存在")
+            return
+        fugitives = data.get("fugitives", [])
+        if not isinstance(fugitives, list):
+            yield event.plain_result("❌ 逃犯数据格式错误")
+            return
+
+        exact_matches = [item for item in fugitives if item.get("name") == keyword]
+        fuzzy_matches = [
+            item
+            for item in fugitives
+            if isinstance(item, dict) and keyword in str(item.get("name", ""))
+        ]
+        matches = exact_matches or fuzzy_matches
+
+        if not matches:
+            fallback = data.get(
+                "not_found_message",
+                "未收录该逃犯，代表没有特殊奖励，可以直接打特工。",
+            )
+            yield event.plain_result(f"未收录逃犯“{keyword}”。{fallback}")
+            return
+
+        if not exact_matches and len(matches) > 1:
+            names = "、".join(str(item.get("name", "未知")) for item in matches)
+            yield event.plain_result(
+                f"找到多个匹配项：{names}\n请提供更完整的逃犯名称。"
+            )
+            return
+
+        yield event.plain_result(self._format_fugitive_result(matches[0]))
 
     @filter.permission_type(filter.PermissionType.ADMIN)
     @zqwn.command("获取文章")
