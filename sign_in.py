@@ -1,4 +1,4 @@
-#sign_in.py
+# sign_in.py
 import base64
 
 import aiohttp
@@ -40,10 +40,10 @@ async def get_server(account: str):
     """
     url = f"{api}/game/server"
     params = {
-            "account": account,
-            "app_id": app_id,
-            "page_id": page_id,
-        }
+        "account": account,
+        "app_id": app_id,
+        "page_id": page_id,
+    }
     datas = await _request_json("get", url, params=params)
     if not isinstance(datas, dict):
         return None
@@ -74,6 +74,7 @@ async def binds_account(headers, payload):
     if not isinstance(data, dict):
         return {"code": -1, "message": "绑定请求失败"}
     return data
+
 
 async def sign_request(headers):
     """执行签到请求

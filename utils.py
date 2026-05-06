@@ -84,6 +84,7 @@ def cron_to_human(cron: str) -> str:
 
     return " ".join(desc)
 
+
 async def send_msg(event: AstrMessageEvent, msg: str) -> int | None:
     """发送消息并返回消息ID
     Args:
@@ -109,8 +110,10 @@ async def send_msg(event: AstrMessageEvent, msg: str) -> int | None:
         logger.error(f"发送消息失败: {exc}")
         return None
 
+
 # ====================== AES 加密工具（个保法合规必备） ======================
 SECRET_KEY = b"a7s9d2k4f6g5h3j1q8w2e4r6t7y0u5i"  # 自己改一个
+
 
 def get_fernet():
     """生成 Fernet 对象用于加密和解密"""
@@ -123,13 +126,16 @@ def get_fernet():
     key = base64.urlsafe_b64encode(kdf.derive(SECRET_KEY))
     return Fernet(key)
 
+
 def encrypt_data(text: str) -> str:
     """加密数据，返回加密后的字符串"""
     return get_fernet().encrypt(text.encode()).decode()
 
+
 def decrypt_data(token: str) -> str:
     """解密数据，返回解密后的字符串"""
     return get_fernet().decrypt(token.encode()).decode()
+
 
 def convert_to_query_bytes(data, account, page_id=1):
     """
@@ -163,13 +169,13 @@ def convert_to_query_bytes(data, account, page_id=1):
         "role_name": data["role_name"],
         "server_id": str(data["server_id"]),
         "server_name": data["server_name"],
-        "type": data["platform"],          # 示例中 type 取自 platform
+        "type": data["platform"],  # 示例中 type 取自 platform
         "platform": data["platform"],
     }
     # 处理 extra 字段：转换为紧凑 JSON 字符串
     extra_raw = data.get("extra")
     extra_data = extra_raw.copy() if isinstance(extra_raw, dict) else {}
-    #将 score 统一转为字符串
+    # 将 score 统一转为字符串
     if "score" in extra_data:
         extra_data["score"] = str(extra_data["score"])
 
@@ -179,6 +185,7 @@ def convert_to_query_bytes(data, account, page_id=1):
     # 进行 URL 编码（使用 quote 而非 quote_plus，保留空格为 %20）
     query_string = urllib.parse.urlencode(params, quote_via=urllib.parse.quote)
     return query_string.encode("utf-8")
+
 
 def get_week():
     """获取当前星期几，返回 0-6 的整数，0 代表周一，6 代表周日"""

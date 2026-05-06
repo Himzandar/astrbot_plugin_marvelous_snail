@@ -18,7 +18,7 @@ class Parse:
         Returns:
             包含标题+简介和链接的字典，键为标题+简介，值为链接
         """
-        #读取作者.json文件
+        # 读取作者.json文件
         selected_author = f"{author}.json"
         author_file = plugin_data_path / selected_author
         if not author_file.exists():
@@ -42,7 +42,7 @@ class Parse:
         if num == 0 or not articles:
             logger.warning(f"作者 {author} 没有文章数据")
             return {}
-        #这里要把标题和简介拼接在一起，并且要与链接关联起来，方便后续发送消息时使用
+        # 这里要把标题和简介拼接在一起，并且要与链接关联起来，方便后续发送消息时使用
         result = {}
         for article in articles:
             if not isinstance(article, dict):
@@ -125,9 +125,9 @@ class Parse:
             strategies (dict): 攻略字典，键为标题，值为链接
             page_size (int): 每页显示的攻略数量
         """
-        #计算总页数
+        # 计算总页数
         total_pages = (len(strategies) + page_size - 1) // page_size
-        #生成每页的攻略列表
+        # 生成每页的攻略列表
         pages_data = []
         pages_msg = []
         for page in range(total_pages):
@@ -135,21 +135,22 @@ class Parse:
             end_index = start_index + page_size
             page_strategies = list(strategies.items())[start_index:end_index]
             formatted_strategies = [
-                f"{tid + 1}. {title}"
-                for tid, (title, _) in enumerate(page_strategies)
+                f"{tid + 1}. {title}" for tid, (title, _) in enumerate(page_strategies)
             ]
-            #记录编号与文章对应关系 并 增加上下页选项
+            # 记录编号与文章对应关系 并 增加上下页选项
             line_data = {}
             for tid, (title, link) in enumerate(page_strategies):
                 line_data[tid + 1] = (title, link)
             if page > 0:
-                formatted_strategies.append(f"{len(line_data)+1}. 上一页")
+                formatted_strategies.append(f"{len(line_data) + 1}. 上一页")
                 line_data[len(line_data) + 1] = "上一页"
             if page < total_pages - 1:
-                formatted_strategies.append(f"{len(line_data)+1}. 下一页")
+                formatted_strategies.append(f"{len(line_data) + 1}. 下一页")
                 line_data[len(line_data) + 1] = "下一页"
 
-            formatted_strategies.insert(0, f"--- 第 {page + 1} 页 / 共 {total_pages} 页 ---")
+            formatted_strategies.insert(
+                0, f"--- 第 {page + 1} 页 / 共 {total_pages} 页 ---"
+            )
             msg = "\n".join(formatted_strategies).replace("digest:", "")
             pages_data.append(line_data)
             pages_msg.append(msg)

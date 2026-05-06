@@ -214,7 +214,9 @@ class MarvelousSnailPlugin(Star):
                             result = "搜索结果:"
                             authors = await self.get_kv_data("authors", {})
                             if not isinstance(authors, dict):
-                                logger.warning("authors 存储数据格式异常，已回退为空字典")
+                                logger.warning(
+                                    "authors 存储数据格式异常，已回退为空字典"
+                                )
                                 authors = {}
                             for item in data_list:
                                 name = item.get("nickname")
@@ -466,7 +468,7 @@ class MarvelousSnailPlugin(Star):
                 logger.error(f"Cron 表达式错误：{updata_cron} ({e})")
         except Exception as e:
             logger.error(f"添加任务失败：{e}")
-        #如果headers存在，设置每日八点10分执行签到任务，并设置30分钟发送签到命令进行header保持
+        # 如果headers存在，设置每日八点10分执行签到任务，并设置30分钟发送签到命令进行header保持
         if not self.headers:
             logger.info("未配置 headers，已跳过签到相关定时任务")
             return
@@ -502,7 +504,7 @@ class MarvelousSnailPlugin(Star):
             message: 要发送的消息内容
         """
         try:
-            data = self.read_file("push_datas","strategy.json")
+            data = self.read_file("push_datas", "strategy.json")
             users = data.get("datas", []) if data else []
             if not users or len(users) == 0:
                 logger.warning("未配置推送用户，无法发送私聊消息")
@@ -537,7 +539,7 @@ class MarvelousSnailPlugin(Star):
         push_list = []
         for uid, user_info in users.items():
             if user_info.get("enabled", False):
-                push_list.append("\n"+user_info.get("umo", "未知"))
+                push_list.append("\n" + user_info.get("umo", "未知"))
         if push_list:
             yield event.plain_result(f"✅ 当前推送用户: {''.join(push_list)}")
         else:
@@ -554,8 +556,8 @@ class MarvelousSnailPlugin(Star):
         uid = group_id
         if not group_id or group_id == 0:
             uid = user_name
-        #读取推送文件夹
-        data = self.read_file("push_datas","strategy.json")
+        # 读取推送文件夹
+        data = self.read_file("push_datas", "strategy.json")
         if not data:
             data = {"datas": []}
         if enabled not in ["开启", "关闭"]:
@@ -575,7 +577,7 @@ class MarvelousSnailPlugin(Star):
                 return
             data["datas"].remove(event.unified_msg_origin)
             yield event.plain_result(f"✅ {uid} 已关闭自动推送")
-        self.write_file("push_datas","strategy.json",data)
+        self.write_file("push_datas", "strategy.json", data)
 
     async def save_strategy(self, authors: str, write_data: Any) -> None:
         """保存攻略数据到本地 JSON 文件，按作者分类保存
@@ -604,7 +606,9 @@ class MarvelousSnailPlugin(Star):
                     num = data.get("num", 0)
                     articles = data.get("articles", [])
                     if not isinstance(articles, list):
-                        logger.warning("%s articles 字段格式异常，已重建列表", authors_file)
+                        logger.warning(
+                            "%s articles 字段格式异常，已重建列表", authors_file
+                        )
                         articles = []
                         num = 0
                     # 根据时间戳排序articles
@@ -706,9 +710,7 @@ class MarvelousSnailPlugin(Star):
                 if not result or not result.get("data"):
                     await event.send(
                         event.plain_result(
-                            result.get(
-                                "msg", f"❌ 作者 {selected_author} 没有文章数据"
-                            )
+                            result.get("msg", f"❌ 作者 {selected_author} 没有文章数据")
                         )
                     )
                     controller.stop()
@@ -769,7 +771,9 @@ class MarvelousSnailPlugin(Star):
             name: 逃犯名称"""
         keyword = name.strip()
         if not keyword:
-            yield event.plain_result("❌ 请输入逃犯名称，例如：最强蜗牛 特工逃犯 白雪公主")
+            yield event.plain_result(
+                "❌ 请输入逃犯名称，例如：最强蜗牛 特工逃犯 白雪公主"
+            )
             return
 
         data = self._load_fugitives_data()
@@ -1036,7 +1040,9 @@ class MarvelousSnailPlugin(Star):
         """
         if not self.headers:
             logger.warning("尝试绑定账号，但插件未配置可用的 headers")
-            await event.send(event.plain_result("❌ 未配置签到请求头，暂时无法绑定账号"))
+            await event.send(
+                event.plain_result("❌ 未配置签到请求头，暂时无法绑定账号")
+            )
             return
 
         info = "【个人信息处理告知】\
@@ -1096,7 +1102,9 @@ class MarvelousSnailPlugin(Star):
                     payload = convert_to_query_bytes(selected_user, account)
                 except Exception as exc:
                     logger.error(f"编码绑定数据失败: {exc}")
-                    await event.send(event.plain_result("❌ 角色数据异常，无法执行绑定"))
+                    await event.send(
+                        event.plain_result("❌ 角色数据异常，无法执行绑定")
+                    )
                     controller.stop()
                     return
 
@@ -1105,7 +1113,7 @@ class MarvelousSnailPlugin(Star):
                     await event.send(
                         event.plain_result(f"✅ 绑定成功: {selected_info}")
                     )
-                    #首次绑定执行一次签到
+                    # 首次绑定执行一次签到
                     sign_result = await sign_request(self.headers)
                     await event.send(
                         event.plain_result(
@@ -1165,6 +1173,7 @@ class MarvelousSnailPlugin(Star):
                     )
                 controller.stop()
                 return
+
         try:
             await bind_waiter(event)
         except TimeoutError as _:
@@ -1176,8 +1185,7 @@ class MarvelousSnailPlugin(Star):
 
     @command("查询绑定")
     async def query_account(self, event: AstrMessageEvent):
-        """查询已绑定的账号，显示已绑定的角色信息
-        """
+        """查询已绑定的账号，显示已绑定的角色信息"""
         # 获取用户ID
         user_id = event.get_sender_id()
         user_id = user_id.replace("/", "_")
@@ -1207,8 +1215,7 @@ class MarvelousSnailPlugin(Star):
 
     @command("注销绑定")
     async def delete_account(self, event: AstrMessageEvent):
-        """删除已绑定的账号，查询已绑定的角色，选择后删除账号数据
-        """
+        """删除已绑定的账号，查询已绑定的角色，选择后删除账号数据"""
         # 获取用户ID
         user_id = event.get_sender_id()
         user_id = user_id.replace("/", "_")
@@ -1234,8 +1241,11 @@ class MarvelousSnailPlugin(Star):
                     select_info += f"\n{id}. {user['info']}"
                     id += 1
                 message_id = await send_msg(event, select_info)
+
                 @session_waiter(timeout=20)
-                async def delete_waiter(controller: SessionController, event: AstrMessageEvent):
+                async def delete_waiter(
+                    controller: SessionController, event: AstrMessageEvent
+                ):
                     nonlocal message_id, users, user_file, user_id
                     now_user_id = event.get_sender_id()
                     now_user_id = now_user_id.replace("/", "_")
@@ -1261,10 +1271,13 @@ class MarvelousSnailPlugin(Star):
                         user_data["num"] = len(users)
                         with user_file.open("w", encoding="utf-8") as f:
                             json.dump(user_data, f, ensure_ascii=False, indent=4)
-                        logger.info(f"用户 {user_id} 已删除一个绑定角色，剩余 {len(users)} 个")
+                        logger.info(
+                            f"用户 {user_id} 已删除一个绑定角色，剩余 {len(users)} 个"
+                        )
                         await event.send(event.plain_result("✅ 账号删除成功"))
                         controller.stop()
                         return
+
                 try:
                     await delete_waiter(event)
                 except TimeoutError as _:
@@ -1277,14 +1290,13 @@ class MarvelousSnailPlugin(Star):
 
     @command("签到")
     async def sign(self, event: AstrMessageEvent):
-        """签到功能，查询已绑定的角色，选择后执行签到
-        """
+        """签到功能，查询已绑定的角色，选择后执行签到"""
         if not self.headers:
             logger.warning("尝试执行签到，但插件未配置可用的 headers")
             await event.send(event.plain_result("❌ 未配置签到请求头，暂时无法签到"))
             return
 
-        #读取文件
+        # 读取文件
         data_dir_str = get_astrbot_data_path()
         plugin_data_path = Path(data_dir_str) / "plugin_data" / self.name
         user_dir = plugin_data_path / "users"
@@ -1314,7 +1326,9 @@ class MarvelousSnailPlugin(Star):
                         )
                         continue
 
-                    users_data = await get_server(account)  # 获取最新的角色信息，更新info显示
+                    users_data = await get_server(
+                        account
+                    )  # 获取最新的角色信息，更新info显示
                     if users_data is None or len(users_data) == 0:
                         logger.error(f"获取角色信息失败: {info}")
                         await event.send(
@@ -1349,7 +1363,9 @@ class MarvelousSnailPlugin(Star):
                                 break
                             else:
                                 error_message = result.get("message", "未知错误")
-                                logger.error(f"签到前绑定失败: {info}，错误信息: {error_message}")
+                                logger.error(
+                                    f"签到前绑定失败: {info}，错误信息: {error_message}"
+                                )
                                 await event.send(
                                     event.plain_result(
                                         f"❌ {info} 绑定失败: {error_message}"
@@ -1370,18 +1386,18 @@ class MarvelousSnailPlugin(Star):
             return
 
     @command("定时签到推送")
-    async def schedule_sign(self, event: AstrMessageEvent,enabled: str):
+    async def schedule_sign(self, event: AstrMessageEvent, enabled: str):
         """定时签到推送开关
         Args:
             enabled: "开启" 或 "关闭"
         """
-        #群聊屏蔽
+        # 群聊屏蔽
         if event.get_message_type() != PlatformMessageType.FRIEND_MESSAGE:
             yield event.plain_result(
                 "⚠️ 该指令仅限私聊使用。\n请私聊发送“定时签到推送 开启”或“定时签到推送 关闭”。"
             )
             return
-        #获取用户ID
+        # 获取用户ID
         user_id = event.get_sender_id()
         user_id = user_id.replace("/", "_")
         data = self.read_file("push_datas", "sign.json")
@@ -1400,27 +1416,30 @@ class MarvelousSnailPlugin(Star):
             return
         if enabled == "开启":
             if uids.get(user_id) is not None:
-                yield event.plain_result(f"✅ {user_id} 已经开启定时签到推送，无需重复操作")
+                yield event.plain_result(
+                    f"✅ {user_id} 已经开启定时签到推送，无需重复操作"
+                )
                 return
             data["datas"].append(event.unified_msg_origin)
             yield event.plain_result(f"✅ {user_id} 已开启定时签到推送")
         else:
-            #关闭直接删除用户的推送信息
+            # 关闭直接删除用户的推送信息
             if uids.get(user_id) is None:
-                yield event.plain_result(f"✅ {user_id} 已经关闭定时签到推送，无需重复操作")
+                yield event.plain_result(
+                    f"✅ {user_id} 已经关闭定时签到推送，无需重复操作"
+                )
                 return
             data["datas"].remove(event.unified_msg_origin)
             yield event.plain_result(f"✅ {user_id} 已关闭定时签到推送")
         self.write_file("push_datas", "sign.json", data)
 
     async def auto_sign_in(self):
-        """定时签到功能，查询已绑定的角色，选择后执行签到
-        """
+        """定时签到功能，查询已绑定的角色，选择后执行签到"""
         if not self.headers:
             logger.info("未配置 headers，跳过定时签到任务")
             return
 
-        #获取推送信息列表
+        # 获取推送信息列表
         data = self.read_file("push_datas", "sign.json")
         if not data:
             logger.info("未找到定时签到推送数据文件，跳过定时签到任务")
@@ -1430,14 +1449,14 @@ class MarvelousSnailPlugin(Star):
         for user in users_sign:
             uid = user.split(":")[-1]
             uids[uid] = user
-        #读取文件
+        # 读取文件
         data_dir_str = get_astrbot_data_path()
         plugin_data_path = Path(data_dir_str) / "plugin_data" / self.name
         user_dir = plugin_data_path / "users"
         if not user_dir.exists():
             logger.info("未找到用户绑定目录，跳过定时签到任务")
             return
-        #定时任务所以获取目录下所有的文件名，文件名即用户ID，根据文件获取用户数据并执行签到
+        # 定时任务所以获取目录下所有的文件名，文件名即用户ID，根据文件获取用户数据并执行签到
         for user_file in user_dir.glob("*.json"):
             user_id = user_file.stem
             user_file = user_dir / f"{user_id}.json"
@@ -1454,12 +1473,14 @@ class MarvelousSnailPlugin(Star):
                 logger.error(f"未找到用户 {user_id} 的绑定数据文件，无法执行签到")
                 continue
             try:
-                #读取用户数据
+                # 读取用户数据
                 with user_file.open("r", encoding="utf-8") as f:
                     user_data = json.load(f)
                     users = user_data.get("users", [])
                     if not isinstance(users, list) or not users:
-                        logger.warning(f"用户 {user_id} 没有可用的绑定角色，跳过定时签到")
+                        logger.warning(
+                            f"用户 {user_id} 没有可用的绑定角色，跳过定时签到"
+                        )
                         continue
                     # Keep only the latest binding for the same role to avoid duplicate sign-ins.
                     unique_users = {}
@@ -1468,9 +1489,7 @@ class MarvelousSnailPlugin(Star):
                             role_id = decrypt_data(user["role_id"])
                         except Exception as exc:
                             logger.error(f"解密用户 {user_id} 的角色数据失败: {exc}")
-                            send_info += (
-                                f"\n{user.get('info', '未知角色')}: 绑定数据已损坏，已跳过"
-                            )
+                            send_info += f"\n{user.get('info', '未知角色')}: 绑定数据已损坏，已跳过"
                             continue
                         unique_users[role_id] = user
                     users = list(unique_users.values())
@@ -1485,7 +1504,9 @@ class MarvelousSnailPlugin(Star):
                             continue
 
                         info = user.get("info", "")
-                        users_server_data = await get_server(account)  # 获取最新的角色信息，更新info显示
+                        users_server_data = await get_server(
+                            account
+                        )  # 获取最新的角色信息，更新info显示
                         if users_server_data is None or len(users_server_data) == 0:
                             send_info += f"\n{info}:获取数据失败，无法执行签到"
                             logger.error(f"获取角色信息失败: {info or user_id}")
@@ -1514,15 +1535,13 @@ class MarvelousSnailPlugin(Star):
                                         f"\n{user['info']}:签到成功, "
                                         f"{sign_result.get('message', '未知结果')}"
                                     )
-                                    #休眠3-5秒，防止请求过快被封IP，间隔随机8-15秒
+                                    # 休眠3-5秒，防止请求过快被封IP，间隔随机8-15秒
                                     random_factor = random.uniform(8, 15)
                                     delay = max(3, random_factor)  # 确保间隔至少为3秒
                                     await asyncio.sleep(delay)
                                 else:
                                     error_message = result.get("message", "未知错误")
-                                    send_info += (
-                                        f"\n{user['info']}:绑定失败，错误信息: {error_message}"
-                                    )
+                                    send_info += f"\n{user['info']}:绑定失败，错误信息: {error_message}"
                                 writer_data.append(user)
                                 break
                         if not matched:
@@ -1534,10 +1553,21 @@ class MarvelousSnailPlugin(Star):
                 logger.error(f"读取用户 {user_id} 的数据失败: {e}")
                 continue
             send_info += "\n【今日签到奖励】"
-            #发送签到结果
+            # 发送签到结果
             if umo:
-                weeks = ["Monday.png", "Tuesday.png", "Wednesday.png", "Thursday.png", "Friday.png", "Saturday.png", "Sunday.png"]
-                img_path = get_astrbot_data_path() + f"/plugins/{self.name}/week/{weeks[get_week()]}"
+                weeks = [
+                    "Monday.png",
+                    "Tuesday.png",
+                    "Wednesday.png",
+                    "Thursday.png",
+                    "Friday.png",
+                    "Saturday.png",
+                    "Sunday.png",
+                ]
+                img_path = (
+                    get_astrbot_data_path()
+                    + f"/plugins/{self.name}/week/{weeks[get_week()]}"
+                )
                 message_chain = MessageChain().message(send_info).file_image(img_path)
                 try:
                     await self.context.send_message(umo, message_chain)  # type: ignore
@@ -1545,7 +1575,7 @@ class MarvelousSnailPlugin(Star):
                 except Exception as e:
                     logger.error(f"发送消息给用户 {umo} 失败: {e}")
                 umo = None
-            #更新文件数据写入
+            # 更新文件数据写入
             writer = {"num": 0, "users": []}
             writer["users"] = writer_data
             writer["num"] = len(writer_data)
@@ -1559,9 +1589,8 @@ class MarvelousSnailPlugin(Star):
 
     @command("账号统计")
     async def account_statistics(self, event: AstrMessageEvent):
-        """账号统计功能，统计已绑定账号的数量和信息
-        """
-        #读取文件
+        """账号统计功能，统计已绑定账号的数量和信息"""
+        # 读取文件
         data_dir_str = get_astrbot_data_path()
         plugin_data_path = Path(data_dir_str) / "plugin_data" / self.name
         user_dir = plugin_data_path / "users"
@@ -1586,7 +1615,7 @@ class MarvelousSnailPlugin(Star):
             yield event.plain_result("❌ 读取数据失败")
             return
 
-    def read_file(self,dir_name:str,file_name:str):
+    def read_file(self, dir_name: str, file_name: str):
         """打开文件，返回文件内容
         Args:
             dir_name: 文件夹名称
@@ -1606,7 +1635,7 @@ class MarvelousSnailPlugin(Star):
             logger.error(f"读取文件 {file_path} 失败: {e}")
             return None
 
-    def write_file(self,dir_name:str,file_name:str,data:dict):
+    def write_file(self, dir_name: str, file_name: str, data: dict):
         """写入文件，保存数据
         Args:
             dir_name: 文件夹名称
