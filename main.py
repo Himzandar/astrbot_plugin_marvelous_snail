@@ -50,8 +50,96 @@ class MarvelousSnailPlugin(Star):
         self.headers = self._parse_headers_config(config.get("headers", "{}"))
         self._fugitives_data_cache: dict[str, Any] | None = None
 
+    async def initialize(self):
+        """插件初始化"""
+        logger.info("最强蜗牛插件已加载")
+        self.parse = Parse()
+        # 设置定时任务
+        #1. 启动前先清理可能存在的旧任务，避免重复添加
+        self.scheduler.remove_all_jobs()
+        #2.1 设置攻略更新监控任务,每30分钟执行一次
+        if self.config.get("exporter_auth_key") and self.config.get("exporter_api_url"):
+            await self._start_auto_job("get_updata_job","*/30 * * * *",self.get_saved_account)
+        else:
+            logger.warning("未配置 API 地址或密钥，已跳过攻略更新监控任务")
+        #2.2 设置每日自动签到任务 (如果配置了 headers)，每天八点10分执行一次
+        if self.headers:
+            await self._start_auto_job("auto_sign_in_job","10 8 * * *",self.auto_sign_in)
+            # headers心跳保持，每30分钟执行一次签到请求，保持 session 有效
+            await self._start_auto_job("keep_sign_in_job","*/30 * * * *",sign_request,[self.headers])
+        else:
+            logger.warning("未配置 headers，已跳过自动签到相关定时任务")
+        if not self.scheduler.running:
+            self.scheduler.start()
+
+    async def terminate(self):
+        """插件卸载"""
+        logger.info("最强蜗牛插件已卸载")
+        if self.scheduler.running:
+            self.scheduler.shutdown()
+            logger.info("调度器已关闭,已停止所有定时任务")
+
+    async def _start_auto_job(self,job_id:str,cron_expr:str,func,args=None):
+        """设置定时任务
+        Args:
+            job_id: 任务 ID，用于管理和识别任务
+            cron_expr: Cron 表达式，定义任务的执行时间
+            func: 任务函数，定时执行的异步函数
+            args: 任务函数的参数列表，默认为 None
+        Cron 表达式示例：0 0 * * *（每天凌晨0点执行）"""
+        # 获取调度器实例
+        scheduler = self.scheduler
+        if scheduler is None:
+            logger.error("Scheduler 未初始化")
+            return
+
+        # 1. 如果已存在同 ID 的任务，先删除旧任务，避免重复添加
+        if scheduler.get_job(job_id):
+            scheduler.remove_job(job_id)
+
+        if not cron_expr:
+            logger.debug(f"未配置 {job_id} 的 Cron 表达式，自动更新已禁用")
+            return
+
+        try:
+            trigger = CronTrigger.from_crontab(cron_expr)
+        except Exception as e:
+            logger.error(f"Cron 表达式错误：{cron_expr} ({e})")
+            return
+
+        #不用传参的情况，args 可能是 None，所以传一个空列表进去
+        if args is None:
+            args = []
+        try:
+            scheduler.add_job(
+                func,
+                trigger=trigger,
+                id=job_id,
+                args=args,
+            )
+            try:
+                human_cron = cron_to_human(cron_expr)
+                logger.info(f"{job_id} 已注册 Cron 监控：{cron_expr} ({human_cron})")
+            except ValueError as e:
+                logger.error(f"{job_id} 的 Cron 表达式错误：{cron_expr} ({e})")
+        except Exception as e:
+            logger.error(f"添加任务失败：{e}")
+
+    def _check_config(self) -> bool:
+        """检查是否已正确配置 API 地址和认证密钥"""
+        api_url = self.config.get("exporter_api_url")
+        auth_key = self.config.get("exporter_auth_key")
+        return bool(
+            api_url
+            and isinstance(api_url, str)
+            and api_url.strip()
+            and auth_key
+            and isinstance(auth_key, str)
+            and auth_key.strip()
+        )
+
     def _parse_headers_config(self, raw_headers: Any) -> dict[str, Any]:
-        """"""
+        """解析 headers 配置项，支持直接使用字典或字符串形式的字典"""
         if isinstance(raw_headers, dict):
             return raw_headers
 
@@ -77,14 +165,14 @@ class MarvelousSnailPlugin(Star):
         return parsed_headers
 
     def _get_base_resp_error(self, payload: Any) -> str:
-        """Extract exporter API error text defensively for logging."""
+        """提取导出器 API 错误信息，用于日志记录和用户反馈"""
         if isinstance(payload, dict):
             base_resp = payload.get("base_resp")
             if isinstance(base_resp, dict):
                 err_msg = base_resp.get("err_msg")
                 if isinstance(err_msg, str) and err_msg.strip():
                     return err_msg
-        return "unknown error"
+        return "未知错误"
 
     @staticmethod
     def _format_role_info(user_data: dict[str, Any]) -> str:
@@ -136,34 +224,6 @@ class MarvelousSnailPlugin(Star):
             lines.append(f"BB 感谢奖励：{bb_thanks_reward}")
 
         return "\n".join(lines)
-
-    async def initialize(self):
-        """插件初始化"""
-        logger.info("最强蜗牛插件已加载")
-        self.parse = Parse()
-        await self._start_auto_updata_job()
-        if not self.scheduler.running:
-            self.scheduler.start()
-
-    async def terminate(self):
-        """插件卸载"""
-        logger.info("最强蜗牛插件已卸载")
-        if self.scheduler.running:
-            self.scheduler.shutdown()
-            logger.info("已停止 Cron 监控")
-
-    def _check_config(self) -> bool:
-        """检查是否已正确配置 API 地址和认证密钥"""
-        api_url = self.config.get("exporter_api_url")
-        auth_key = self.config.get("exporter_auth_key")
-        return bool(
-            api_url
-            and isinstance(api_url, str)
-            and api_url.strip()
-            and auth_key
-            and isinstance(auth_key, str)
-            and auth_key.strip()
-        )
 
     @command_group("最强蜗牛")
     def zqwn(self):
@@ -431,73 +491,6 @@ class MarvelousSnailPlugin(Star):
         else:
             await self.put_kv_data("articles", new_articles)
 
-    async def _start_auto_updata_job(self):
-        """根据配置的 Cron 表达式设置监控任务
-        Cron 表达式示例：0 0 * * *（每天凌晨0点执行）"""
-        scheduler = self.scheduler
-        if scheduler is None:
-            logger.error("Scheduler 未初始化")
-            return
-
-        job_id = "updata_cron_job"
-        updata_cron = self.config.get("updata_cron")
-
-        if scheduler.get_job(job_id):
-            scheduler.remove_job(job_id)
-
-        if not updata_cron:
-            logger.debug("未配置 updata_cron，自动更新已禁用")
-            return
-
-        try:
-            trigger = CronTrigger.from_crontab(updata_cron)
-        except Exception as e:
-            logger.error(f"Cron 表达式错误：{updata_cron} ({e})")
-            return
-
-        try:
-            self.scheduler.add_job(
-                self.get_saved_account,
-                trigger=trigger,
-                id=job_id,
-            )
-            try:
-                human_cron = cron_to_human(updata_cron)
-                logger.info(f"已注册 Cron 监控：{updata_cron} ({human_cron})")
-            except ValueError as e:
-                logger.error(f"Cron 表达式错误：{updata_cron} ({e})")
-        except Exception as e:
-            logger.error(f"添加任务失败：{e}")
-        # 如果headers存在，设置每日八点10分执行签到任务，并设置30分钟发送签到命令进行header保持
-        if not self.headers:
-            logger.info("未配置 headers，已跳过签到相关定时任务")
-            return
-
-        try:
-            sign_trigger = CronTrigger(hour=8, minute=10)
-            self.scheduler.add_job(
-                self.auto_sign_in,
-                trigger=sign_trigger,
-                id="auto_sign_in_job",
-            )
-            logger.info("已注册自动签到任务：每天 08:10")
-        except Exception as e:
-            logger.error(f"添加自动签到任务失败：{e}")
-        try:
-            # Keep the sign-in session available for manual and scheduled tasks.
-            self.scheduler.add_job(
-                sign_request,
-                trigger=CronTrigger(minute="*/30"),  # 每30分钟执行一次
-                id="keep_sign_in_job",
-                args=[self.headers],
-            )
-            logger.info("已注册签到保持任务：每30分钟执行一次")
-            # Prime the session once on startup to reduce the first-use failure rate.
-            ret = await sign_request(self.headers)
-            logger.info(f"初始签到保持结果: {ret}")
-        except Exception as e:
-            logger.error(f"添加签到保持任务失败：{e}")
-
     async def _send_message(self, message: str):
         """发送消息
         Args:
@@ -528,20 +521,15 @@ class MarvelousSnailPlugin(Star):
                 "⚠️ 该指令仅限私聊使用。\n请私聊发送“最强蜗牛 攻略推送列表”。"
             )
             return
-        users = await self.get_kv_data("users", {}) or {}
-        if not isinstance(users, dict):
-            logger.warning("users 推送配置格式异常，无法获取推送列表")
-            yield event.plain_result("❌ 推送配置异常，请联系管理员")
-            return
-        if not users or len(users) == 0:
+        # 读取推送文件夹
+        data = self.read_file("push_datas", "strategy.json")
+        if not data:
             yield event.plain_result("❌ 未配置推送用户")
             return
-        push_list = []
-        for uid, user_info in users.items():
-            if user_info.get("enabled", False):
-                push_list.append("\n" + user_info.get("umo", "未知"))
+        push_list = data.get("datas", [])
         if push_list:
-            yield event.plain_result(f"✅ 当前推送用户: {''.join(push_list)}")
+            msg = "\n".join(push_list)
+            yield event.plain_result(f"✅ 当前推送用户: {msg}")
         else:
             yield event.plain_result("❌ 没有开启自动推送的用户")
 
