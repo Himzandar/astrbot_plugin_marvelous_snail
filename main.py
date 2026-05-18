@@ -49,6 +49,15 @@ class MarvelousSnailPlugin(Star):
         self.authors = {}
         self.headers = self._parse_headers_config(config.get("headers", "{}"))
         self._fugitives_data_cache: dict[str, Any] | None = None
+        self._auto_sign_progress = {
+            "running": False,
+            "total_users": 0,
+            "completed_users": 0,
+            "current_user": None,
+            "current_role": None,
+            "started_at": None,
+            "last_finished_at": None,
+        }
 
     async def initialize(self):
         """插件初始化"""
@@ -185,6 +194,59 @@ class MarvelousSnailPlugin(Star):
         server_name = user_data.get("server_name", "未知区服")
         role_name = user_data.get("role_name", "未知角色")
         return f"{server_name}-{role_name}:{score}"
+
+    def _set_auto_sign_progress(
+        self,
+        *,
+        running: bool,
+        total_users: int | None = None,
+        completed_users: int | None = None,
+        current_user: str | None = None,
+        current_role: str | None = None,
+        started_at: float | None = None,
+        last_finished_at: float | None = None,
+    ) -> None:
+        """更新定时签到进度状态。"""
+        progress = self._auto_sign_progress
+        progress["running"] = running
+        if total_users is not None:
+            progress["total_users"] = total_users
+        if completed_users is not None:
+            progress["completed_users"] = completed_users
+        progress["current_user"] = current_user
+        progress["current_role"] = current_role
+        if started_at is not None:
+            progress["started_at"] = started_at
+        if last_finished_at is not None:
+            progress["last_finished_at"] = last_finished_at
+
+    def _format_auto_sign_progress(self) -> str:
+        """格式化当前定时签到进度。"""
+        progress = self._auto_sign_progress
+        if progress["running"]:
+            current_user = progress.get("current_user") or "暂未开始具体用户"
+            current_role = progress.get("current_role") or "暂未定位具体角色"
+            return (
+                "【定时签到进度】\n"
+                f"状态: 进行中\n"
+                f"进度: {progress.get('completed_users', 0)}/{progress.get('total_users', 0)}\n"
+                f"当前用户: {current_user}\n"
+                f"当前角色: {current_role}"
+            )
+
+        last_finished_at = progress.get("last_finished_at")
+        if last_finished_at:
+            finished_time = time.strftime(
+                "%Y-%m-%d %H:%M:%S", time.localtime(last_finished_at)
+            )
+            return (
+                "【定时签到进度】\n"
+                "状态: 空闲\n"
+                f"上次执行: {finished_time}\n"
+                f"上次进度: {progress.get('completed_users', 0)}/{progress.get('total_users', 0)}"
+            )
+
+        return "【定时签到进度】\n状态: 当前没有进行中的定时签到"
 
     def _load_fugitives_data(self) -> dict[str, Any] | None:
         """读取特工逃犯数据文件，返回包含逃犯信息的字典"""
@@ -1421,6 +1483,28 @@ class MarvelousSnailPlugin(Star):
             yield event.plain_result(f"✅ {user_id} 已关闭定时签到推送")
         self.write_file("push_datas", "sign.json", data)
 
+    @command("定时签到进度")
+    async def auto_sign_progress(self, event: AstrMessageEvent):
+        """查看当前定时签到任务进度。"""
+        yield event.plain_result(self._format_auto_sign_progress())
+
+    @zqwn.command("help")
+    async def show_help(self, event: AstrMessageEvent):
+        """查看普通用户可用指令。"""
+        help_text = (
+            "【最强蜗牛插件帮助】\n"
+            "绑定账号 <手机号>\n"
+            "查询绑定\n"
+            "注销绑定\n"
+            "定时签到推送 开启|关闭\n"
+            "定时签到进度\n"
+            "最强蜗牛 搜索攻略 <关键词>\n"
+            "最强蜗牛 特工逃犯 <名称>\n"
+            "最强蜗牛 攻略推送 开启|关闭\n"
+            "账号统计"
+        )
+        yield event.plain_result(help_text)
+
     async def auto_sign_in(self):
         """定时签到功能，查询已绑定的角色，选择后执行签到"""
         if not self.headers:
@@ -1444,136 +1528,177 @@ class MarvelousSnailPlugin(Star):
         if not user_dir.exists():
             logger.info("未找到用户绑定目录，跳过定时签到任务")
             return
-        # 定时任务所以获取目录下所有的文件名，文件名即用户ID，根据文件获取用户数据并执行签到
-        for user_file in user_dir.glob("*.json"):
-            user_id = user_file.stem
-            user_file = user_dir / f"{user_id}.json"
-            send_info = "【定时签到推送】"
-            writer_data = []
-            umo = None
-            if uids.get(user_id):
-                umo = uids[user_id]
-            if not user_file.exists():
-                send_info += "\n未找到绑定数据，无法执行签到"
-                if umo:
-                    message_chain = MessageChain().message(send_info)
-                    await self.context.send_message(umo, message_chain)  # type: ignore
-                logger.error(f"未找到用户 {user_id} 的绑定数据文件，无法执行签到")
-                continue
-            try:
-                # 读取用户数据
-                with user_file.open("r", encoding="utf-8") as f:
-                    user_data = json.load(f)
-                    users = user_data.get("users", [])
-                    if not isinstance(users, list) or not users:
-                        logger.warning(
-                            f"用户 {user_id} 没有可用的绑定角色，跳过定时签到"
-                        )
-                        continue
-                    # Keep only the latest binding for the same role to avoid duplicate sign-ins.
-                    unique_users = {}
-                    for user in users:
-                        try:
-                            role_id = decrypt_data(user["role_id"])
-                        except Exception as exc:
-                            logger.error(f"解密用户 {user_id} 的角色数据失败: {exc}")
-                            send_info += f"\n{user.get('info', '未知角色')}: 绑定数据已损坏，已跳过"
-                            continue
-                        unique_users[role_id] = user
-                    users = list(unique_users.values())
-                    for user in users:
-                        info = user.get("info", "未知角色")
-                        try:
-                            account = decrypt_data(user["account"])
-                            role_id = decrypt_data(user["role_id"])
-                        except Exception as exc:
-                            logger.error(f"解密用户 {user_id} 的账号数据失败: {exc}")
-                            send_info += f"\n{info}: 数据解密失败，已跳过"
-                            continue
+        user_files = list(user_dir.glob("*.json"))
+        if not user_files:
+            logger.info("用户绑定目录为空，跳过定时签到任务")
+            return
 
-                        info = user.get("info", "")
-                        users_server_data = await get_server(
-                            account
-                        )  # 获取最新的角色信息，更新info显示
-                        if users_server_data is None or len(users_server_data) == 0:
-                            send_info += f"\n{info}:获取数据失败，无法执行签到"
-                            logger.error(f"获取角色信息失败: {info or user_id}")
+        random.shuffle(user_files)
+        self._set_auto_sign_progress(
+            running=True,
+            total_users=len(user_files),
+            completed_users=0,
+            current_user=None,
+            current_role=None,
+            started_at=time.time(),
+        )
+
+        try:
+            # 定时任务所以获取目录下所有的文件名，文件名即用户ID，根据文件获取用户数据并执行签到
+            for index, user_file in enumerate(user_files, start=1):
+                user_id = user_file.stem
+                self._set_auto_sign_progress(
+                    running=True,
+                    completed_users=index - 1,
+                    current_user=user_id,
+                    current_role=None,
+                )
+                send_info = "【定时签到推送】"
+                writer_data = []
+                umo = None
+                if uids.get(user_id):
+                    umo = uids[user_id]
+                try:
+                    if not user_file.exists():
+                        send_info += "\n未找到绑定数据，无法执行签到"
+                        if umo:
+                            message_chain = MessageChain().message(send_info)
+                            await self.context.send_message(umo, message_chain)  # type: ignore
+                        logger.error(f"未找到用户 {user_id} 的绑定数据文件，无法执行签到")
+                        continue
+                    # 读取用户数据
+                    with user_file.open("r", encoding="utf-8") as f:
+                        user_data = json.load(f)
+                        users = user_data.get("users", [])
+                        if not isinstance(users, list) or not users:
+                            logger.warning(
+                                f"用户 {user_id} 没有可用的绑定角色，跳过定时签到"
+                            )
                             continue
-                        matched = False
-                        for user_server_data in users_server_data:
-                            if user_server_data.get("role_id") == role_id:
-                                matched = True
-                                user["info"] = self._format_role_info(user_server_data)
-                                try:
-                                    payload = convert_to_query_bytes(
-                                        user_server_data, account
-                                    )
-                                except Exception as exc:
-                                    logger.error(f"编码定时签到数据失败: {exc}")
-                                    send_info += (
-                                        f"\n{user['info']}: 数据异常，无法执行签到"
-                                    )
+                        # Keep only the latest binding for the same role to avoid duplicate sign-ins.
+                        unique_users = {}
+                        for user in users:
+                            try:
+                                role_id = decrypt_data(user["role_id"])
+                            except Exception as exc:
+                                logger.error(f"解密用户 {user_id} 的角色数据失败: {exc}")
+                                send_info += f"\n{user.get('info', '未知角色')}: 绑定数据已损坏，已跳过"
+                                continue
+                            unique_users[role_id] = user
+                        users = list(unique_users.values())
+                        for user in users:
+                            info = user.get("info", "未知角色")
+                            self._set_auto_sign_progress(
+                                running=True,
+                                completed_users=index - 1,
+                                current_user=user_id,
+                                current_role=info,
+                            )
+                            try:
+                                account = decrypt_data(user["account"])
+                                role_id = decrypt_data(user["role_id"])
+                            except Exception as exc:
+                                logger.error(f"解密用户 {user_id} 的账号数据失败: {exc}")
+                                send_info += f"\n{info}: 数据解密失败，已跳过"
+                                continue
+
+                            info = user.get("info", "")
+                            users_server_data = await get_server(
+                                account
+                            )  # 获取最新的角色信息，更新info显示
+                            if users_server_data is None or len(users_server_data) == 0:
+                                send_info += f"\n{info}:获取数据失败，无法执行签到"
+                                logger.error(f"获取角色信息失败: {info or user_id}")
+                                continue
+                            matched = False
+                            for user_server_data in users_server_data:
+                                if user_server_data.get("role_id") == role_id:
+                                    matched = True
+                                    user["info"] = self._format_role_info(user_server_data)
+                                    try:
+                                        payload = convert_to_query_bytes(
+                                            user_server_data, account
+                                        )
+                                    except Exception as exc:
+                                        logger.error(f"编码定时签到数据失败: {exc}")
+                                        send_info += (
+                                            f"\n{user['info']}: 数据异常，无法执行签到"
+                                        )
+                                        writer_data.append(user)
+                                        break
+
+                                    result = await binds_account(self.headers, payload)
+                                    if result.get("code") == 200:
+                                        sign_result = await sign_request(self.headers)
+                                        send_info += (
+                                            f"\n{user['info']}:签到成功, "
+                                            f"{sign_result.get('message', '未知结果')}"
+                                        )
+                                        # 休眠3-5秒，防止请求过快被封IP，间隔随机8-15秒
+                                        random_factor = random.uniform(8, 15)
+                                        delay = max(3, random_factor)  # 确保间隔至少为3秒
+                                        await asyncio.sleep(delay)
+                                    else:
+                                        error_message = result.get("message", "未知错误")
+                                        send_info += f"\n{user['info']}:绑定失败，错误信息: {error_message}"
                                     writer_data.append(user)
                                     break
-
-                                result = await binds_account(self.headers, payload)
-                                if result.get("code") == 200:
-                                    sign_result = await sign_request(self.headers)
-                                    send_info += (
-                                        f"\n{user['info']}:签到成功, "
-                                        f"{sign_result.get('message', '未知结果')}"
-                                    )
-                                    # 休眠3-5秒，防止请求过快被封IP，间隔随机8-15秒
-                                    random_factor = random.uniform(8, 15)
-                                    delay = max(3, random_factor)  # 确保间隔至少为3秒
-                                    await asyncio.sleep(delay)
-                                else:
-                                    error_message = result.get("message", "未知错误")
-                                    send_info += f"\n{user['info']}:绑定失败，错误信息: {error_message}"
-                                writer_data.append(user)
-                                break
-                        if not matched:
-                            logger.warning(f"定时签到未找到匹配角色: {info or user_id}")
-                            send_info += (
-                                f"\n{info or '未知角色'}: 未找到最新角色信息，已跳过"
-                            )
-            except Exception as e:
-                logger.error(f"读取用户 {user_id} 的数据失败: {e}")
-                continue
-            send_info += "\n【今日签到奖励】"
-            # 发送签到结果
-            if umo:
-                weeks = [
-                    "Monday.png",
-                    "Tuesday.png",
-                    "Wednesday.png",
-                    "Thursday.png",
-                    "Friday.png",
-                    "Saturday.png",
-                    "Sunday.png",
-                ]
-                img_path = (
-                    get_astrbot_data_path()
-                    + f"/plugins/{self.name}/week/{weeks[get_week()]}"
-                )
-                message_chain = MessageChain().message(send_info).file_image(img_path)
-                try:
-                    await self.context.send_message(umo, message_chain)  # type: ignore
-                    logger.info(f"已发送消息给用户 {umo}: {send_info}")
+                            if not matched:
+                                logger.warning(f"定时签到未找到匹配角色: {info or user_id}")
+                                send_info += (
+                                    f"\n{info or '未知角色'}: 未找到最新角色信息，已跳过"
+                                )
                 except Exception as e:
-                    logger.error(f"发送消息给用户 {umo} 失败: {e}")
-                umo = None
-            # 更新文件数据写入
-            writer = {"num": 0, "users": []}
-            writer["users"] = writer_data
-            writer["num"] = len(writer_data)
-            try:
-                with user_file.open("w", encoding="utf-8") as f:
-                    json.dump(writer, f, ensure_ascii=False, indent=4)
-            except Exception as e:
-                logger.error(f"写回用户 {user_id} 的签到数据失败: {e}")
-                continue
-            logger.info(f"用户 {user_id} 的定时签到已完成")
+                    logger.error(f"读取用户 {user_id} 的数据失败: {e}")
+                    continue
+                send_info += "\n【今日签到奖励】"
+                # 发送签到结果
+                if umo:
+                    weeks = [
+                        "Monday.png",
+                        "Tuesday.png",
+                        "Wednesday.png",
+                        "Thursday.png",
+                        "Friday.png",
+                        "Saturday.png",
+                        "Sunday.png",
+                    ]
+                    img_path = (
+                        get_astrbot_data_path()
+                        + f"/plugins/{self.name}/week/{weeks[get_week()]}"
+                    )
+                    message_chain = MessageChain().message(send_info).file_image(img_path)
+                    try:
+                        await self.context.send_message(umo, message_chain)  # type: ignore
+                        logger.info(f"已发送消息给用户 {umo}: {send_info}")
+                    except Exception as e:
+                        logger.error(f"发送消息给用户 {umo} 失败: {e}")
+                    umo = None
+                # 更新文件数据写入
+                writer = {"num": 0, "users": []}
+                writer["users"] = writer_data
+                writer["num"] = len(writer_data)
+                try:
+                    with user_file.open("w", encoding="utf-8") as f:
+                        json.dump(writer, f, ensure_ascii=False, indent=4)
+                except Exception as e:
+                    logger.error(f"写回用户 {user_id} 的签到数据失败: {e}")
+                    continue
+                logger.info(f"用户 {user_id} 的定时签到已完成")
+                self._set_auto_sign_progress(
+                    running=True,
+                    completed_users=index,
+                    current_user=user_id,
+                    current_role=None,
+                )
+        finally:
+            self._set_auto_sign_progress(
+                running=False,
+                completed_users=len(user_files),
+                current_user=None,
+                current_role=None,
+                last_finished_at=time.time(),
+            )
 
     @command("账号统计")
     async def account_statistics(self, event: AstrMessageEvent):
