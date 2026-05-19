@@ -53,6 +53,7 @@ class MarvelousSnailPlugin(Star):
         self.plugin_dir = Path(get_astrbot_plugin_path()) / PLUGIN_NAME
         self.data_dir = Path(get_astrbot_data_path()) / "plugin_data" / PLUGIN_NAME
         self.cache_dir = Path(get_astrbot_temp_path()) / PLUGIN_NAME
+        self.randomizer = random.SystemRandom()
         self.scheduler = AsyncIOScheduler()
         self.authors = {}
         self.headers = self._parse_headers_config(config.get("headers", "{}"))
@@ -1772,7 +1773,8 @@ class MarvelousSnailPlugin(Star):
             logger.info("用户绑定目录为空，跳过定时签到任务")
             return
 
-        random.shuffle(user_files)
+        # 使用系统级随机源打乱用户签到顺序，避免每天看起来都是同一批用户先签到。
+        self.randomizer.shuffle(user_files)
         summary_lines: list[str] = []
         self._set_auto_sign_progress(
             running=True,
@@ -1828,6 +1830,8 @@ class MarvelousSnailPlugin(Star):
                                 continue
                             unique_users[role_id] = user
                         users = list(unique_users.values())
+                        # 进一步打乱同一用户下各账号的签到顺序，避免多账号用户每天顺序固定。
+                        self.randomizer.shuffle(users)
                         for user in users:
                             info = user.get("info", "未知角色")
                             self._set_auto_sign_progress(
