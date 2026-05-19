@@ -94,7 +94,7 @@ class MarvelousSnailPlugin(Star):
             logger.warning("未配置 API 地址或密钥，已跳过攻略更新监控任务")
         #2.2 设置每日自动签到任务 (如果配置了 headers)，每天八点10分执行一次
         if self.headers:
-            await self._start_auto_job("auto_sign_in_job","41 1 * * *",self.auto_sign_in)
+            await self._start_auto_job("auto_sign_in_job","10 8 * * *",self.auto_sign_in)
             # headers心跳保持，每30分钟执行一次签到请求，保持 session 有效
             await self._start_auto_job("keep_sign_in_job","*/30 * * * *",sign_request,[self.headers])
         else:
