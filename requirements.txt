@@ -3,3 +3,4 @@ lxml
 jieba
 apscheduler
 cryptography
+pillowmd

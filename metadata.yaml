@@ -1,6 +1,6 @@
 name: astrbot_plugin_marvelous_snail
 display_name: 最强蜗牛🐌
-desc: 定时拉取最新文章、自动推送、密令解析、游戏账号绑定与自动签到功能、特工查询
-version: v1.2.6
+desc: 定时拉取最新文章、密令解析、账号绑定签到、状态图片展示与群聊签到汇总推送
+version: v1.2.7
 author: Himzandar
 repo: https://github.com/Himzandar/astrbot_plugin_marvelous_snail
