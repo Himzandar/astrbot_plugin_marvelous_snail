@@ -444,11 +444,6 @@ class MarvelousSnailPlugin(Star):
         }.get(state, "暂无记录")
         return state_text, message, updated_text
 
-    def _is_sign_push_enabled(self, umo: str) -> bool:
-        data = self.read_file("push_datas", "sign.json") or {}
-        datas = data.get("datas", []) if isinstance(data, dict) else []
-        return umo in datas
-
     def _get_group_sign_push_targets(self) -> list[str]:
         """读取已登记的群聊汇总推送目标。"""
         data = self.read_file("push_datas", "sign.json") or {}
@@ -465,7 +460,6 @@ class MarvelousSnailPlugin(Star):
             "# 最强蜗牛用户状态",
             f"- 用户ID: {user_id}",
             f"- 已绑定账号: {len(users)}",
-            f"- 定时签到推送: {'已开启' if self._is_sign_push_enabled(umo) else '未开启'}",
             "",
             "## 账号状态",
         ]
