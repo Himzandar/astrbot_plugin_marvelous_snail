@@ -2,7 +2,13 @@
 
 # 🐌 最强蜗牛插件
 
-astrbot_plugin_marvelous_snail 是一个面向 AstrBot 的最强蜗牛攻略插件，提供以下能力：
+**astrbot_plugin_marvelous_snail** 是一个面向 AstrBot 的最强蜗牛攻略插件
+
+[![GitHub](https://img.shields.io/badge/GitHub-Repository-blue?style=flat-square)](https://github.com/Himzandar/astrbot_plugin_marvelous_snail)
+
+---
+
+## ✨ 功能特性
 
 - 🔍 搜索并关注公众号作者
 - 📰 定时全量修正作者文章并自动推送最新内容
@@ -12,14 +18,17 @@ astrbot_plugin_marvelous_snail 是一个面向 AstrBot 的最强蜗牛攻略插�
 - 📱 绑定游戏账号并执行签到
 - ⏰ 每日自动签到并向群聊推送汇总结果
 - 🖼️ 攻略搜索结果、查询绑定与定时签到结果支持渲染为图片发送
+- 🔄 每 30 分钟自动保活签到会话
 
-这个插件依赖外部服务和你自己抓取的请求头数据，不能开箱即用。使用前请先看完下面的准备步骤。
+---
 
-## 🚧 使用前准备
+## 📋 使用前准备
+
+> ⚠️ 这个插件依赖外部服务和你自己抓取的请求头数据，不能开箱即用。使用前请先看完下面的准备步骤。
 
 ### 1. 自行部署 wechat-article-exporter
 
-本插件不会帮你部署文章导出服务，你需要先准备一个可用的 wechat-article-exporter 接口，并把地址和 auth key 填进插件配置。
+本插件不会帮你部署文章导出服务，你需要先准备一个可用的 wechat-article-exporter 接口。
 
 - 项目地址：https://github.com/wechat-article/wechat-article-exporter
 - 插件会调用这些接口：
@@ -33,7 +42,7 @@ astrbot_plugin_marvelous_snail 是一个面向 AstrBot 的最强蜗牛攻略插�
 
 - 需要自行抓取最强蜗牛相关的 binds 请求头数据
 - 将抓到的请求头以 Python 字典字符串形式填入 headers 配置项
-- 请删除 content-length 字段，避免请求体变化后导致请求异常
+- 请删除 `content-length` 字段，避免请求体变化后导致请求异常
 - 如果没有正确配置 headers，以下功能都不可用：
   - 绑定账号
   - 手动签到
@@ -43,21 +52,21 @@ astrbot_plugin_marvelous_snail 是一个面向 AstrBot 的最强蜗牛攻略插�
 ### 3. 权限和使用场景说明
 
 - 👮 作者管理相关命令大多要求管理员权限
-- 💬 部分命令只允许私聊使用，代码里会直接拦截群聊
-- 🏷️ 作者搜索目前只支持关键词“最强蜗牛”
+- 💬 部分命令只允许私聊使用，代码里会直接拦截群聊、
+
+---
 
 ## ⚙️ 配置说明
 
-插件配置项与 _conf_schema.json 一致。
+插件配置项与 `_conf_schema.json` 一致。
 
 ### 配置示例
 
 ```json
 {
-  "exporter_api_url": "http://127.0.0.1:3000",
-  "exporter_auth_key": "your-auth-key",
-  "updata_cron": "0 5 * * *",
-  "headers": "{'user-agent': 'xxx', 'cookie': 'xxx'}"
+    "exporter_api_url": "http://127.0.0.1:3000",
+    "exporter_auth_key": "your-auth-key",
+    "headers": "{'user-agent': 'xxx', 'cookie': 'xxx'}"
 }
 ```
 
@@ -65,18 +74,32 @@ astrbot_plugin_marvelous_snail 是一个面向 AstrBot 的最强蜗牛攻略插�
 
 | 配置项 | 必填 | 说明 |
 | --- | --- | --- |
-| exporter_api_url | 是 | wechat-article-exporter 的 API 地址，末尾不要带 / |
+| exporter_api_url | 是 | wechat-article-exporter 的 API 地址，末尾不要带斜杠 |
 | exporter_auth_key | 是 | wechat-article-exporter 的 auth key |
-| updata_cron | 否 | 攻略自动更新周期，使用 5 段 Cron 表达式 |
 | headers | 否 | 你自行抓取的 binds 请求头，字典字符串格式 |
 
 ### 定时任务行为
 
-- 📰 攻略更新任务：由 updata_cron 控制
+- 📰 攻略更新任务：每 50 分钟自动执行一次
 - 🔄 每次更新会对已关注作者做全量同步，自动删除 is_deleted=true 的文章，并刷新本地 synced_at
 - 🐢 同步作者文章时，分页请求之间会随机等待 1 到 3 秒，避免请求过快导致失败
 - 📝 自动签到任务：代码中固定为每天 08:10 执行
 - 🔄 签到保活任务：代码中固定为每 30 分钟执行一次
+
+---
+
+## 📦 依赖项
+
+```
+aiohttp
+lxml
+jieba
+apscheduler
+cryptography
+pillowmd
+```
+
+---
 
 ## 🚀 快速上手
 
@@ -175,6 +198,33 @@ send_code
 - 过期超过约 2 个月的密令会被自动清理
 - 当有效密令超过 50 条时，会按聊天记录形式分段发送
 
+## 📝 命令列表
+
+### 🐌 最强蜗牛相关命令（攻略功能）
+
+| 命令 | 权限 | 场景 | 说明 |
+|------|------|------|------|
+| `最强蜗牛 作者搜索 [关键词] [数量]` | 管理员 | 私聊 | 搜索公众号作者（默认关键词：最强蜗牛，数量：5） |
+| `最强蜗牛 作者添加 <编号>` | 管理员 | 私聊 | 添加搜索结果中的作者 |
+| `最强蜗牛 作者删除 <作者名>` | 管理员 | 私聊 | 删除已添加的作者 |
+| `最强蜗牛 作者列表` | 管理员 | 私聊 | 列出已添加的作者 |
+| `最强蜗牛 攻略推送 <开启/关闭>` | 任意 | 任意 | 开启或关闭当前会话的攻略推送 |
+| `最强蜗牛 搜索攻略 <关键词>` | 任意 | 任意 | 搜索本地缓存的攻略 |
+| `最强蜗牛 获取文章 <作者名>` | 任意 | 任意 | 获取指定作者的文章 |
+
+### 📱 签到功能命令
+
+| 命令 | 权限 | 场景 | 说明 |
+|------|------|------|------|
+| `绑定账号 <手机号>` | 任意 | 任意 | 绑定游戏账号 |
+| `查询绑定` | 任意 | 任意 | 查询当前用户绑定的账号 |
+| `注销绑定` | 任意 | 任意 | 注销已绑定的账号 |
+| `签到` | 任意 | 任意 | 手动执行签到 |
+| `定时签到推送 <开启/关闭>` | 任意 | 群聊 | 开启或关闭定时签到汇总推送 |
+| `账号统计` | 任意 | 任意 | 统计插件保存的用户数和账号数 |
+
+---
+
 ## 📱 签到功能用法
 
 只有在正确配置 headers 后，下面这些命令才可用。
@@ -245,7 +295,8 @@ send_code
 
 ```text
 data/plugin_data/astrbot_plugin_marvelous_snail/
-├── 作者名.json
+├── authors/
+│   └── 作者名.json
 ├── codes/
 │   ├── codes.json
 │   └── code_error.json
@@ -258,13 +309,14 @@ data/plugin_data/astrbot_plugin_marvelous_snail/
 
 说明：
 
-- 作者名.json：缓存作者文章列表，包含 synced_at、num、articles 等精简字段
-- codes.json：保存已解析的密令
-- code_error.json：记录解析失败的文章链接
-- strategy.json：保存攻略推送目标
-- sign.json：保存定时签到推送目标
-- sign.json：保存已开启定时签到汇总推送的群聊目标
-- users/用户ID.json：保存当前用户绑定的加密账号信息
+- **authors/作者名.json**：缓存作者文章列表，包含 synced_at、num、articles 等精简字段
+- **codes/codes.json**：保存已解析的密令
+- **codes/code_error.json**：记录解析失败的文章链接
+- **push_datas/strategy.json**：保存攻略推送目标
+- **push_datas/sign.json**：保存定时签到汇总推送的群聊目标
+- **users/用户ID.json**：保存当前用户绑定的加密账号信息
+
+---
 
 ## 🔒 隐私与安全
 
@@ -279,9 +331,10 @@ data/plugin_data/astrbot_plugin_marvelous_snail/
 - exporter 服务由你自己部署和维护
 - 任何接口失效、封禁或结构变更都可能导致插件失效
 
+---
+
 ## 📌 已知限制
 
-- 作者搜索目前只支持“最强蜗牛”
 - 部分作者管理命令仅支持私聊且要求管理员权限
 - 自动签到时间当前写死为每天 08:10，不走配置项
 - 没有 exporter 服务时，攻略相关功能不可用
@@ -290,7 +343,9 @@ data/plugin_data/astrbot_plugin_marvelous_snail/
 
 ## 🙏 致谢
 
-- wechat-article-exporter：https://github.com/wechat-article/wechat-article-exporter
+- [wechat-article-exporter](https://github.com/wechat-article/wechat-article-exporter)
+
+---
 
 ## 🚫 免责声明
 
