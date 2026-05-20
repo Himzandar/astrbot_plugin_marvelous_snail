@@ -11,12 +11,12 @@ class Parse:
         pass
 
     async def get_author_all_title_and_link(self, plugin_data_path: Path, author: str):
-        """获取作者的所有文章标题+简介和链接
+        """获取作者的所有文章标题、简介和链接
         Args:
             plugin_data_path: 插件数据路径
             author: 作者名称
         Returns:
-            包含标题+简介和链接的字典，键为标题+简介，值为链接
+            文章列表，元素包含标题、简介和链接
         """
         # 读取作者.json文件
         selected_author = f"{author}.json"
@@ -41,18 +41,18 @@ class Parse:
         articles = author_data.get("articles", [])
         if num == 0 or not articles:
             logger.warning(f"作者 {author} 没有文章数据")
-            return {}
-        # 这里要把标题和简介拼接在一起，并且要与链接关联起来，方便后续发送消息时使用
-        result = {}
+            return []
+
+        result = []
         for article in articles:
             if not isinstance(article, dict):
                 continue
-            title = article.get("title", "")
-            digest = article.get("digest", "")
-            link = article.get("link", "")
+            title = str(article.get("title", "")).strip()
+            digest = str(article.get("digest", "")).strip()
+            link = str(article.get("link", "")).strip()
             if not title or not link:
                 continue
-            result[f"{title}digest:{digest}"] = link
+            result.append({"title": title, "digest": digest, "link": link})
         return result
 
     def chinese_relevance_score(self, title, query):
@@ -73,23 +73,31 @@ class Parse:
             return 0.0
         return len(intersection) / len(union)
 
-    def search_chinese_relevance(self, data_dict, query):
-        """根据中文相关度对数据字典进行搜索和排序
+    def search_chinese_relevance(self, articles, query):
+        """根据中文相关度对文章列表进行搜索和排序
         Args:
-            data_dict: 数据字典，键为标题，值为链接
+            articles: 文章列表
             query: 查询字符串
-        Returns:            按相关度排序的结果列表，元素为 (标题, 链接, 相关度分数) 的元组
+        Returns:
+            按相关度排序的结果列表，元素为 (文章, 相关度分数) 的元组
         """
-        if not isinstance(data_dict, dict):
+        if not isinstance(articles, list):
             logger.warning("搜索攻略时未获得有效的文章索引")
             return []
 
         results = []
-        for title, value in data_dict.items():
-            score = self.chinese_relevance_score(title, query)
+        for article in articles:
+            if not isinstance(article, dict):
+                continue
+            title = str(article.get("title", "")).strip()
+            digest = str(article.get("digest", "")).strip()
+            searchable_text = f"{title} {digest}".strip()
+            if not searchable_text:
+                continue
+            score = self.chinese_relevance_score(searchable_text, query)
             if score > 0:
-                results.append((title, value, score))
-        results.sort(key=lambda x: x[2], reverse=True)
+                results.append((article, score))
+        results.sort(key=lambda x: x[1], reverse=True)
         return results
 
     async def parse_title_send_link(
@@ -101,22 +109,22 @@ class Parse:
             author: 作者名称
             parse_str: 要解析的字符串
         """
-        ret = {"msg": "", "data": {}}
+        ret = {"msg": "", "data": []}
         articles = await self.get_author_all_title_and_link(plugin_data_path, author)
         if not articles:
             msg = f"{author} 暂无可搜索的攻略数据"
             logger.info(msg)
-            return {"msg": msg, "data": {}}
+            return {"msg": msg, "data": []}
 
         data = self.search_chinese_relevance(articles, parse_str)
         if data is None or len(data) == 0:
             msg = f"{author} 没有{parse_str}相关的攻略"
             logger.info(msg)
-            return {"msg": msg, "data": {}}
+            return {"msg": msg, "data": []}
         ret["msg"] = f"{author}:{parse_str}相关攻略，共{len(data)}条，请回复编号选择："
 
-        for title, link, _score in data:
-            ret["data"][title] = link
+        for article, _score in data:
+            ret["data"].append(article)
         return ret
 
     async def Paging_strategies(self, strategies: dict, page_size: int = 5):

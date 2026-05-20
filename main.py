@@ -10,16 +10,14 @@ import aiohttp
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 
-from astrbot.api import AstrBotConfig, logger
+from astrbot.api import AstrBotConfig, llm_tool, logger
 from astrbot.api.event import AstrMessageEvent, MessageChain, filter
 from astrbot.api.event.filter import (
-    EventMessageType,
     command,
     command_group,
-    event_message_type,
 )
 from astrbot.api.star import Context, Star
-from astrbot.core.message.components import Image, Plain
+from astrbot.core.message.components import Image, Node, Nodes, Plain
 from astrbot.core.platform import MessageType as PlatformMessageType
 from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event import (
     AiocqhttpMessageEvent,
@@ -88,9 +86,9 @@ class MarvelousSnailPlugin(Star):
         # 设置定时任务
         #1. 启动前先清理可能存在的旧任务，避免重复添加
         self.scheduler.remove_all_jobs()
-        #2.1 设置攻略更新监控任务,每30分钟执行一次
+        #2.1 设置攻略更新监控任务,每小时执行一次
         if self.config.get("exporter_auth_key") and self.config.get("exporter_api_url"):
-            await self._start_auto_job("get_updata_job","*/30 * * * *",self.get_saved_account)
+            await self._start_auto_job("get_updata_job","*/50 * * * *",self.get_saved_account)
         else:
             logger.warning("未配置 API 地址或密钥，已跳过攻略更新监控任务")
         #2.2 设置每日自动签到任务 (如果配置了 headers)，每天八点10分执行一次
@@ -295,6 +293,144 @@ class MarvelousSnailPlugin(Star):
         这里主要服务于“查询绑定”等会话内命令：优先渲染成图片发送，渲染失败时
         自动退回纯文本，避免因为样式或 pillowmd 异常导致命令不可用。
         """
+        await self._send_markdown_card(event, content, msg=msg, stop_event=True)
+
+    def _build_markdown_render_text(self, content: str, msg: str | None = None) -> str:
+        """构造用于图片渲染的 Markdown 文本。"""
+        return content if not msg else f"# {msg}\n\n{content}"
+
+    def _split_markdown_chunks(self, content: str, max_lines: int = 50) -> list[str]:
+        """按行数切分 Markdown，避免单张图片过长。"""
+        lines = content.splitlines()
+        if len(lines) <= max_lines:
+            return [content]
+
+        chunks = []
+        for index in range(0, len(lines), max_lines):
+            chunk = "\n".join(lines[index : index + max_lines]).strip()
+            if chunk:
+                chunks.append(chunk)
+        return chunks or [content]
+
+    async def _render_markdown_chunks(self, content: str) -> list[str]:
+        """将 Markdown 分片渲染为多张图片，返回图片路径列表。"""
+        style = self.style
+        if style is None:
+            raise RuntimeError("Markdown style is not available")
+
+        image_paths: list[str] = []
+        for chunk in self._split_markdown_chunks(content):
+            img = await style.AioRender(text=chunk, useImageUrl=True)
+            img_path = img.Save(self.cache_dir)
+            image_paths.append(str(img_path))
+        return image_paths
+
+    def _build_forward_nodes(self, image_paths: list[str], name: str, uin: str) -> Nodes:
+        """根据图片列表构造聊天记录节点。"""
+        nodes = [
+            Node(name=name, uin=uin, content=[Image.fromFileSystem(image_path)])
+            for image_path in image_paths
+        ]
+        return Nodes(nodes=nodes)
+
+    def _build_text_forward_nodes(
+        self,
+        chunks: list[str],
+        name: str,
+        uin: str,
+    ) -> Nodes:
+        """根据文本分片构造聊天记录节点。"""
+        nodes = [
+            Node(name=name, uin=uin, content=[Plain(chunk)])
+            for chunk in chunks
+            if chunk.strip()
+        ]
+        return Nodes(nodes=nodes)
+
+    async def _send_forward_images_for_event(
+        self,
+        event: AstrMessageEvent,
+        image_paths: list[str],
+    ) -> None:
+        """向当前会话发送图片聊天记录。"""
+        sender_uin = event.get_self_id() or "0"
+        forward = self._build_forward_nodes(image_paths, "最强蜗牛攻略", sender_uin)
+        await event.send(event.chain_result([forward]))
+
+    async def _send_forward_text_for_event(
+        self,
+        event: AstrMessageEvent,
+        chunks: list[str],
+        *,
+        name: str = "最强蜗牛密令",
+    ) -> None:
+        """向当前会话发送文本聊天记录。"""
+        sender_uin = event.get_self_id() or "0"
+        forward = self._build_text_forward_nodes(chunks, name, sender_uin)
+        await event.send(event.chain_result([forward]))
+
+    async def _send_forward_images_to_target(
+        self,
+        target: str,
+        image_paths: list[str],
+    ) -> None:
+        """向指定目标发送图片聊天记录。"""
+        forward = self._build_forward_nodes(image_paths, "最强蜗牛攻略", "0")
+        await self.context.send_message(target, MessageChain(chain=[forward]))  # type: ignore
+
+    def _load_valid_codes(self) -> list[str]:
+        """读取当前有效密令列表。"""
+        data_dir_str = get_astrbot_data_path()
+        plugin_data_path = Path(data_dir_str) / "plugin_data" / self.name
+        codes_dir = plugin_data_path / "codes"
+        codes_file = codes_dir / "codes.json"
+        codes: dict[str, Any] = {}
+        if codes_file.exists():
+            try:
+                with codes_file.open("r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    payload = data.get("code", {}) if isinstance(data, dict) else {}
+                    if isinstance(payload, dict):
+                        codes = payload
+            except Exception as e:
+                logger.error(f"读取密令数据失败: {e}")
+        return list(codes.keys())
+
+    def _split_codes_chunks(self, codes_list: list[str], chunk_size: int = 50) -> list[str]:
+        """按指定数量切分密令列表，适配聊天记录发送。"""
+        chunks = []
+        for index in range(0, len(codes_list), chunk_size):
+            chunk_codes = codes_list[index : index + chunk_size]
+            if not chunk_codes:
+                continue
+            chunks.append("\n".join(chunk_codes))
+        return chunks
+
+    async def _send_codes_to_event(self, event: AstrMessageEvent) -> None:
+        """向当前会话发送有效密令列表。"""
+        codes_list = self._load_valid_codes()
+        if not codes_list:
+            await event.send(event.plain_result("❌ 当前没有可用密令"))
+            return
+
+        if len(codes_list) > 50:
+            await self._send_forward_text_for_event(
+                event,
+                self._split_codes_chunks(codes_list, 50),
+            )
+            return
+
+        await event.send(event.plain_result("\n".join(codes_list)))
+
+    async def _send_markdown_card(
+        self,
+        event: AstrMessageEvent,
+        content: str,
+        *,
+        msg: str | None = None,
+        stop_event: bool = False,
+    ) -> None:
+        """向当前会话发送 Markdown 卡片，可按需选择是否停止事件。"""
         chain = []
 
         if msg:
@@ -302,18 +438,31 @@ class MarvelousSnailPlugin(Star):
 
         if self.style:
             try:
-                img = await self.style.AioRender(text=content, useImageUrl=True)
-                img_path = img.Save(self.cache_dir)
-                chain.append(Image(str(img_path)))
-                await event.send(event.chain_result(chain))
-                event.stop_event()
+                render_text = self._build_markdown_render_text(content, msg)
+                image_paths = await self._render_markdown_chunks(render_text)
+                if len(image_paths) > 1:
+                    await self._send_forward_images_for_event(event, image_paths)
+                else:
+                    single_text = content
+                    if msg:
+                        single_text = self._build_markdown_render_text(content, None)
+                    image_paths = await self._render_markdown_chunks(single_text)
+                    img_path = image_paths[0]
+                    chain = []
+                    if msg:
+                        chain.append(Plain(msg))
+                    chain.append(Image(str(img_path)))
+                    await event.send(event.chain_result(chain))
+                if stop_event:
+                    event.stop_event()
                 return
             except Exception as e:
                 logger.error(f"渲染状态卡失败，已回退文本输出：{e}")
 
         fallback = f"{msg}\n\n{content}" if msg else content
         await event.send(event.plain_result(fallback))
-        event.stop_event()
+        if stop_event:
+            event.stop_event()
 
     async def _send_rendered_message(
         self,
@@ -330,13 +479,15 @@ class MarvelousSnailPlugin(Star):
         """
         if self.style:
             try:
-                render_text = content if not msg else f"# {msg}\n\n{content}"
-                img = await self.style.AioRender(text=render_text, useImageUrl=True)
-                img_path = img.Save(self.cache_dir)
-                message_chain = MessageChain().file_image(str(img_path))
+                render_text = self._build_markdown_render_text(content, msg)
+                image_paths = await self._render_markdown_chunks(render_text)
                 if extra_image_path:
-                    message_chain.file_image(extra_image_path)
-                await self.context.send_message(target, message_chain)  # type: ignore
+                    image_paths.append(extra_image_path)
+                if len(image_paths) > 1:
+                    await self._send_forward_images_to_target(target, image_paths)
+                else:
+                    message_chain = MessageChain().file_image(image_paths[0])
+                    await self.context.send_message(target, message_chain)  # type: ignore
                 return
             except Exception as e:
                 logger.error(f"渲染推送图片失败，已回退文本输出：{e}")
@@ -453,8 +604,240 @@ class MarvelousSnailPlugin(Star):
         group_flag = f":{PlatformMessageType.GROUP_MESSAGE.value}:"
         return [target for target in datas if isinstance(target, str) and group_flag in target]
 
+    def _get_author_cache_dir(self) -> Path:
+        """返回攻略作者缓存目录。"""
+        return self.data_dir / "authors"
+
+    def _get_author_cache_file(self, author: str) -> Path:
+        """返回作者缓存文件路径。"""
+        return self._get_author_cache_dir() / f"{author}.json"
+
+    def _load_author_cache_payload(self, author: str) -> dict[str, Any] | None:
+        """读取作者缓存文件。"""
+        author_file = self._get_author_cache_file(author)
+        if not author_file.exists():
+            return None
+
+        try:
+            with author_file.open("r", encoding="utf-8") as f:
+                payload = json.load(f)
+        except Exception as e:
+            logger.error(f"读取作者缓存 {author_file} 失败: {e}")
+            return None
+
+        if not isinstance(payload, dict):
+            logger.warning(f"作者缓存文件格式无效: {author_file}")
+            return None
+        return payload
+
+    def _compact_author_article(self, article: dict[str, Any]) -> dict[str, Any] | None:
+        """提取攻略搜索真正需要的字段，减少本地冗余存储。"""
+        title = str(article.get("title", "")).strip()
+        link = str(article.get("link", "")).strip()
+        if not title or not link:
+            return None
+
+        compacted: dict[str, Any] = {
+            "title": title,
+            "link": link,
+        }
+
+        aid = article.get("aid")
+        if aid not in (None, ""):
+            compacted["aid"] = aid
+
+        digest = str(article.get("digest", "")).strip()
+        if digest:
+            compacted["digest"] = digest
+
+        for field in ("update_time", "create_time"):
+            value = article.get(field)
+            if isinstance(value, int | float):
+                compacted[field] = int(value)
+
+        return compacted
+
+    def _get_author_cache_key(self, article: dict[str, Any]) -> tuple[str, str] | None:
+        """生成文章缓存主键，优先使用 aid 以便覆盖作者二次编辑后的新链接。"""
+        aid = article.get("aid")
+        if aid not in (None, ""):
+            return ("aid", str(aid))
+
+        title = str(article.get("title", "")).strip()
+        if title:
+            return ("title", title)
+
+        link = str(article.get("link", "")).strip()
+        if link:
+            return ("link", link)
+
+        return None
+
+    def _merge_author_articles(
+        self,
+        existing_articles: list[dict[str, Any]],
+        incoming_articles: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """合并作者文章缓存，覆盖旧链接并移除已删除文章。"""
+        article_map: dict[tuple[str, str], dict[str, Any]] = {}
+
+        for article in existing_articles:
+            if not isinstance(article, dict):
+                continue
+            cache_key = self._get_author_cache_key(article)
+            if cache_key is None:
+                continue
+            compacted = self._compact_author_article(article)
+            if compacted is None:
+                continue
+            article_map[cache_key] = compacted
+
+        for article in incoming_articles:
+            if not isinstance(article, dict):
+                continue
+            cache_key = self._get_author_cache_key(article)
+            if cache_key is None:
+                continue
+            if article.get("is_deleted") is True:
+                article_map.pop(cache_key, None)
+                continue
+            compacted = self._compact_author_article(article)
+            if compacted is None:
+                continue
+            article_map[cache_key] = compacted
+
+        merged_articles = list(article_map.values())
+        merged_articles.sort(
+            key=lambda item: (
+                item.get("update_time")
+                or item.get("create_time")
+                or item.get("aid")
+                or 0
+            ),
+            reverse=True,
+        )
+        return merged_articles
+
+    def _render_author_selection_markdown(self, authors: list[str]) -> str:
+        """渲染作者选择卡片。"""
+        lines = [
+            "# 攻略作者列表",
+            "请回复编号选择作者：",
+            "",
+        ]
+        for index, author in enumerate(authors, start=1):
+            lines.append(f"{index}. {author}")
+        return "\n".join(lines)
+
+    def _render_strategy_search_markdown(
+        self,
+        author: str,
+        keyword: str,
+        results: list[dict[str, Any]],
+    ) -> str:
+        """渲染攻略搜索结果卡片。"""
+        lines = [
+            "# 攻略搜索结果",
+            f"- 作者: {author}",
+            f"- 关键词: {keyword}",
+            f"- 命中数量: {len(results)}",
+        ]
+
+        lines.extend(["", "## 结果列表"])
+        for index, article in enumerate(results, start=1):
+            title = str(article.get("title", "未命名文章")).strip()
+            digest = str(article.get("digest", "")).strip()
+            lines.append(f"### {index}. {title}")
+            if digest:
+                lines.append(f"- 简介: {digest}")
+            lines.append("")
+
+        lines.append("请回复编号选择文章。")
+        return "\n".join(lines).strip()
+
+    def _get_latest_strategy_article(self, articles: list[dict[str, Any]]) -> dict[str, Any] | None:
+        """从文章列表中选出最新且未删除的文章，用于更新通知。"""
+        available_articles = [
+            article
+            for article in articles
+            if isinstance(article, dict)
+            and article.get("is_deleted") is not True
+            and article.get("author_name") != "广告"
+        ]
+        if not available_articles:
+            return None
+
+        available_articles.sort(
+            key=lambda item: (
+                item.get("update_time")
+                or item.get("create_time")
+                or item.get("aid")
+                or 0
+            ),
+            reverse=True,
+        )
+        return available_articles[0]
+
+    async def _sync_author_articles(
+        self, author: str, fakeid: str
+    ) -> list[dict[str, Any]] | None:
+        """按作者同步文章列表，用于修正旧链接并清理已删除文章。"""
+        if not self._check_config() or not fakeid:
+            return None
+
+        fetched_articles: list[dict[str, Any]] = []
+        begin = 0
+        page_size = 20
+        headers = {"X-Auth-Key": self.config.get("exporter_auth_key")}
+        api_url = self.config.get("exporter_api_url")
+
+        async with aiohttp.ClientSession() as session:
+            while True:
+                params = {"fakeid": fakeid, "begin": begin, "size": page_size}
+                try:
+                    async with session.get(
+                        f"{api_url}/api/public/v1/article",
+                        headers=headers,
+                        params=params,
+                    ) as resp:
+                        if resp.status != 200:
+                            logger.warning(
+                                f"同步作者 {author} 文章失败，HTTP 状态码: {resp.status}"
+                            )
+                            return None
+
+                        data = await resp.json(content_type=None)
+                except Exception as e:
+                    logger.error(f"同步作者 {author} 文章失败: {e}")
+                    return None
+
+                base_resp = data.get("base_resp") if isinstance(data, dict) else None
+                if not base_resp or base_resp.get("err_msg") != "ok":
+                    err_msg = self._get_base_resp_error(data)
+                    logger.warning("同步 %s 的文章失败: %s", author, err_msg)
+                    return None
+
+                articles = data.get("articles", [])
+                if not isinstance(articles, list) or len(articles) == 0:
+                    break
+
+                for article in articles:
+                    if not isinstance(article, dict):
+                        continue
+                    if article.get("author_name") == "广告":
+                        continue
+                    fetched_articles.append(article)
+
+                if len(articles) < page_size:
+                    break
+                begin += page_size
+                await asyncio.sleep(random.uniform(1, 3))
+
+        await self.save_strategy(author, fetched_articles, synced_at=int(time.time()))
+        return fetched_articles
+
     def _render_user_status_markdown(
-        self, user_id: str, umo: str, users: list[dict[str, Any]]
+        self, user_id: str, users: list[dict[str, Any]]
     ) -> str:
         lines = [
             "# 最强蜗牛用户状态",
@@ -669,7 +1052,7 @@ class MarvelousSnailPlugin(Star):
         yield event.plain_result(result)
 
     async def get_saved_account(self):
-        """获取已保存的公众号作者的最新文章"""
+        """定时全量修正作者文章缓存，并在检测到最新文章变化时推送通知。"""
         authors = await self.get_kv_data("authors", {}) or {}
         if not isinstance(authors, dict) or len(authors) == 0:
             return
@@ -680,100 +1063,63 @@ class MarvelousSnailPlugin(Star):
         updata_flag = False
         for name, fakeid in authors.items():
             logger.debug(f"正在获取作者 {name} 的文章列表...")
-            async with aiohttp.ClientSession() as session:
-                headers = {"X-Auth-Key": self.config.get("exporter_auth_key")}
-                params = {"fakeid": fakeid, "size": 1}
-                try:
-                    async with session.get(
-                        f"{self.config.get('exporter_api_url')}/api/public/v1/article",
-                        headers=headers,
-                        params=params,
-                    ) as resp:
-                        if resp.status != 200:
-                            logger.error(
-                                f"获取作者 {name} 文章失败，HTTP 状态码: {resp.status}"
-                            )
-                            continue
-                        try:
-                            data = await resp.json(content_type=None)
-                            base_resp = data.get("base_resp")
-                            if base_resp and base_resp.get("err_msg") == "ok":
-                                # 处理成功响应
-                                articles = data.get("articles")  # 设置了只获取1条文章
-                                if articles is None or len(articles) == 0:
-                                    logger.debug(f"❌ 作者 {name} 没有文章")
-                                    continue
-                                article = articles[0]
-                                aid = article.get("aid")
-                                title = article.get("title")
-                                digest = article.get("digest")
-                                link = article.get("link")
-                                author_name = article.get("author_name")
-                                if author_name == "广告":  # 如果是广告，就不保存了
-                                    continue
-                                if (
-                                    name in old_articles.keys()
-                                ):  # 是否添加过这个作者的文章
-                                    old_aid = old_articles[name].get("aid")
-                                    if old_aid == aid:
-                                        logger.debug(f"✅ 作者 {name} 未更新")
-                                        new_articles[name] = old_articles[name]  # type: ignore
-                                        continue
-                                    else:
-                                        # 发布了新文章
-                                        updata_flag = True
-                                        new_articles[name] = article
-                                        await self.save_strategy(name, article)
-                                        logger.debug(
-                                            f"✅ 作者 {name} old_aid: {old_aid} aid: {aid} 发布了新文章: {article.get('title')}\n链接: {link}"
-                                        )
-                                        await self._send_message(
-                                            f"作者: {name}\n文章标题: {title}\n文章简介: {digest}\n链接: {link}"
-                                        )
-                                        if name == "最强蜗牛":
-                                            # 如果是最强蜗牛的文章，解析密令并发送
-                                            code_info = await self.get_code(link)
-                                            code = code_info.get("code")
-                                            if code and len(code) > 0:
-                                                send_txt = f"密令:{code}"
-                                                if code_info.get("share"):
-                                                    send_txt += f"\n{digest}"
-                                                    self.write_codes(
-                                                        digest.split("密令：")[-1]
-                                                    )
-                                                await self._send_message(send_txt)
-                                else:
-                                    # 发布了新文章
-                                    updata_flag = True
-                                    new_articles[name] = article
-                                    await self.save_strategy(name, article)
-                                    logger.debug(
-                                        f"✅ 作者 {name} aid: {aid} 发布了新文章: {article.get('title')}\n链接: {link}"
-                                    )
-                                    await self._send_message(
-                                        f"作者: {name}\n文章标题: {title}\n文章简介: {digest}\n链接: {link}"
-                                    )
-                                    if name == "最强蜗牛":
-                                        # 如果是最强蜗牛的文章，解析密令并发送
-                                        code_info = await self.get_code(link)
-                                        code = code_info.get("code")
-                                        if code and len(code) > 0:
-                                            send_txt = f"密令:{code}"
-                                            if code_info.get("share"):
-                                                send_txt += f"\n{digest}"
-                                                self.write_codes(
-                                                    digest.split("密令：")[-1]
-                                                )
-                                            await self._send_message(send_txt)
-                            else:
-                                # 处理失败响应
-                                err_msg = self._get_base_resp_error(data)
-                                logger.warning("获取 %s 的文章失败: %s", name, err_msg)
-                        except (ValueError, KeyError) as e:
-                            logger.error(f"API 响应解析失败: {e}")
+            fetched_articles = await self._sync_author_articles(name, fakeid)
+            if fetched_articles is None:
+                continue
 
-                except Exception as e:
-                    logger.error(f"获取公众号文章失败: {e}")
+            article = self._get_latest_strategy_article(fetched_articles)
+            if article is None:
+                logger.debug(f"❌ 作者 {name} 没有可用文章")
+                continue
+
+            aid = article.get("aid")
+            title = str(article.get("title", ""))
+            digest = str(article.get("digest", ""))
+            link = str(article.get("link", ""))
+            if not link:
+                logger.warning(f"作者 {name} 的最新文章缺少链接，已跳过推送")
+                continue
+            if name in old_articles.keys():
+                old_aid = old_articles[name].get("aid")
+                if old_aid == aid:
+                    logger.debug(f"✅ 作者 {name} 未更新")
+                    new_articles[name] = old_articles[name]  # type: ignore
+                else:
+                    updata_flag = True
+                    new_articles[name] = article
+                    logger.debug(
+                        f"✅ 作者 {name} old_aid: {old_aid} aid: {aid} 发布了新文章: {article.get('title')}\n链接: {link}"
+                    )
+                    await self._send_message(
+                        f"作者: {name}\n文章标题: {title}\n文章简介: {digest}\n链接: {link}"
+                    )
+                    if name == "最强蜗牛":
+                        code_info = await self.get_code(link)
+                        code = code_info.get("code")
+                        if code and len(code) > 0:
+                            send_txt = f"密令:{code}"
+                            if code_info.get("share") and digest:
+                                send_txt += f"\n{digest}"
+                                self.write_codes(digest.split("密令：")[-1])
+                            await self._send_message(send_txt)
+            else:
+                updata_flag = True
+                new_articles[name] = article
+                logger.debug(
+                    f"✅ 作者 {name} aid: {aid} 发布了新文章: {article.get('title')}\n链接: {link}"
+                )
+                await self._send_message(
+                    f"作者: {name}\n文章标题: {title}\n文章简介: {digest}\n链接: {link}"
+                )
+                if name == "最强蜗牛":
+                    code_info = await self.get_code(link)
+                    code = code_info.get("code")
+                    if code and len(code) > 0:
+                        send_txt = f"密令:{code}"
+                        if code_info.get("share") and digest:
+                            send_txt += f"\n{digest}"
+                            self.write_codes(digest.split("密令：")[-1])
+                        await self._send_message(send_txt)
             base_delay = 6
             random_factor = random.uniform(-5, 5)
             delay = max(5, base_delay + random_factor)  # 确保间隔至少为5秒
@@ -860,46 +1206,55 @@ class MarvelousSnailPlugin(Star):
             yield event.plain_result(f"✅ {uid} 已关闭自动推送")
         self.write_file("push_datas", "strategy.json", data)
 
-    async def save_strategy(self, authors: str, write_data: Any) -> None:
+    async def save_strategy(
+        self,
+        authors: str,
+        write_data: Any,
+        *,
+        synced_at: int | None = None,
+    ) -> None:
         """保存攻略数据到本地 JSON 文件，按作者分类保存
         Args:
             authors: 作者名称
             write_data: 要保存的数据
         """
-        # 1. 获取字符串路径，并显式转换为 Path 对象
-        data_dir_str = get_astrbot_data_path()
-        plugin_data_path = Path(data_dir_str) / "plugin_data" / self.name / "authors"
-
-        # 2. 创建目录 (此时 plugin_data_path 是 Path 对象，所以 .mkdir() 可用)
+        plugin_data_path = self._get_author_cache_dir()
         plugin_data_path.mkdir(parents=True, exist_ok=True)
-        # 3.尝试读取文件
         authors_file = plugin_data_path / f"{authors}.json"
-        data = {"num": 1, "articles": [write_data]}
+
+        incoming_articles = []
+        if isinstance(write_data, dict):
+            incoming_articles = [write_data]
+        elif isinstance(write_data, list):
+            incoming_articles = [item for item in write_data if isinstance(item, dict)]
+
+        if not incoming_articles and not authors_file.exists() and synced_at is None:
+            logger.warning("作者 %s 没有可写入的文章数据", authors)
+            return
+
+        existing_articles: list[dict[str, Any]] = []
         if authors_file.exists():
             try:
                 with authors_file.open("r", encoding="utf-8") as f:
                     data = json.load(f)
                     if not isinstance(data, dict):
                         logger.warning("%s 数据格式异常，已重建文件", authors_file)
-                        data = {"num": 1, "articles": [write_data]}
-                        raise ValueError("invalid author file payload")
-                    # 获取数据数量
-                    num = data.get("num", 0)
+                        data = {}
                     articles = data.get("articles", [])
                     if not isinstance(articles, list):
                         logger.warning(
                             "%s articles 字段格式异常，已重建列表", authors_file
                         )
                         articles = []
-                        num = 0
-                    # 根据时间戳排序articles
-                    # articles.sort(key=lambda x: x.get("update_time", 0), reverse=True)
-                    # 头插
-                    articles.insert(0, write_data)
-                    num += 1
-                    data = {"num": num, "articles": articles}
+                    existing_articles = articles
             except Exception as e:
                 logger.error(f"读取 {authors}.json 失败，使用回退数据继续写入: {e}")
+        merged_articles = self._merge_author_articles(existing_articles, incoming_articles)
+        data = {
+            "synced_at": synced_at if synced_at is not None else int(time.time()),
+            "num": len(merged_articles),
+            "articles": merged_articles,
+        }
         # 4.尝试写入文件
         try:
             with authors_file.open("w", encoding="utf-8") as f:
@@ -915,11 +1270,8 @@ class MarvelousSnailPlugin(Star):
         """
         user_stage = "select_author"
         selected_author = None
-        pages_msg, pages_data = [], []
-        message_id = None
-        page_id = 0
-        data_dir_str = get_astrbot_data_path()
-        plugin_data_path = Path(data_dir_str) / "plugin_data" / self.name / "authors"
+        strategy_map: dict[int, tuple[str, str]] = {}
+        plugin_data_path = self._get_author_cache_dir()
         if not plugin_data_path.exists():
             logger.info("攻略缓存目录不存在，当前没有可查询数据")
             await event.send(event.plain_result("❌ 暂无数据存储"))
@@ -932,12 +1284,10 @@ class MarvelousSnailPlugin(Star):
             logger.info("没有已保存的作者和文章数据，请先添加作者并等待更新")
             await event.send(event.plain_result("❌ 暂无数据存储"))
             return
-        formatted_authors = [
-            f"{index + 1}. {author}" for index, author in enumerate(authors)
-        ]
-        formatted_authors.insert(0, "需要获取谁的文章详情？请回复编号选择：")
-        msg = "\n".join(formatted_authors)
-        message_id = await send_msg(event, msg)
+        await self._send_markdown_card(
+            event,
+            self._render_author_selection_markdown(authors),
+        )
         # 如果是群聊记录用户ID
         group_id = getattr(event.message_obj, "group_id", None)
         user_id = None
@@ -945,18 +1295,12 @@ class MarvelousSnailPlugin(Star):
             user_id = event.get_sender_id()
             user_id = user_id.replace("/", "_")
 
-        @session_waiter(timeout=20)
+        @session_waiter(timeout=60)
         async def articles_waiter(
             controller: SessionController, event: AstrMessageEvent
         ):
             # Drive the author-selection and article-selection states in one waiter.
-            nonlocal \
-                user_stage, \
-                selected_author, \
-                pages_msg, \
-                pages_data, \
-                message_id, \
-                page_id
+            nonlocal user_stage, selected_author, strategy_map
             now_user_id = event.get_sender_id()
             now_user_id = now_user_id.replace("/", "_")
             if user_id and now_user_id != user_id:
@@ -967,12 +1311,6 @@ class MarvelousSnailPlugin(Star):
             if len(parts) == 0:
                 logger.debug("攻略选择流程收到空输入，继续等待用户响应")
                 return
-            if isinstance(event, AiocqhttpMessageEvent):  # 判断aiocqhttp平台
-                if message_id:
-                    await event.bot.delete_msg(
-                        message_id=message_id
-                    )  # 用户响应撤回消息
-                    message_id = None
 
             if user_stage == "select_author":
                 arg = event.message_str.strip()
@@ -997,13 +1335,22 @@ class MarvelousSnailPlugin(Star):
                     controller.stop()
                     return
                 user_stage = "select_article"
-                pages_msg, pages_data = await self.parse.Paging_strategies(
-                    result["data"], 5
+                results = result["data"]
+                strategy_map = {
+                    idx: (item.get("title", ""), item.get("link", ""))
+                    for idx, item in enumerate(results, start=1)
+                    if isinstance(item, dict)
+                }
+                await self._send_markdown_card(
+                    event,
+                    self._render_strategy_search_markdown(
+                        selected_author,
+                        parse_str,
+                        results,
+                    ),
                 )
-                # 发送第一页攻略列表
-                message_id = await send_msg(event, pages_msg[page_id])
                 controller.keep(
-                    timeout=20, reset_timeout=True
+                    timeout=60, reset_timeout=True
                 )  # 重置超时时间，等待用户选择文章
             elif user_stage == "select_article":
                 arg = event.message_str.strip()
@@ -1013,28 +1360,15 @@ class MarvelousSnailPlugin(Star):
                     select_article_id = int(parts[0])
                 else:
                     return
-                if select_article_id < 1 or select_article_id > len(
-                    pages_data[page_id]
-                ):
+                if select_article_id < 1 or select_article_id > len(strategy_map):
                     return
-                if select_article_id in pages_data[page_id]:
-                    selected = pages_data[page_id][select_article_id]
-                    if selected == "上一页":
-                        page_id = max(0, page_id - 1)
-                        message_id = await send_msg(event, pages_msg[page_id])
-                    elif selected == "下一页":
-                        page_id = min(len(pages_msg) - 1, page_id + 1)
-                        message_id = await send_msg(event, pages_msg[page_id])
-                    else:
-                        title, link = selected
-                        await event.send(event.plain_result(link))
-                        controller.stop()
-                        return
-                else:
+                selected = strategy_map.get(select_article_id)
+                if not selected:
                     return
-                controller.keep(
-                    timeout=20, reset_timeout=True
-                )  # 重置超时时间，等待用户选择文章
+                _title, link = selected
+                await event.send(event.plain_result(link))
+                controller.stop()
+                return
 
         try:
             await articles_waiter(event)
@@ -1090,87 +1424,6 @@ class MarvelousSnailPlugin(Star):
             return
 
         yield event.plain_result(self._format_fugitive_result(matches[0]))
-
-    @filter.permission_type(filter.PermissionType.ADMIN)
-    @zqwn.command("获取文章")
-    async def get_(self, event: AstrMessageEvent, author_in: str):
-        """获取指定作者的所有文章并保存到本地 JSON 文件,需要管理员权限
-        Args:
-            event: 消息事件对象
-            author_in: 作者名称
-        """
-        if event.get_message_type() != PlatformMessageType.FRIEND_MESSAGE:
-            yield event.plain_result(
-                "⚠️ 该指令仅限私聊使用。\n请私聊发送“最强蜗牛 攻略推送列表”。"
-            )
-            return
-        authors = await self.get_kv_data("authors", {})  # 这个是用来获取fakeid
-        write_data = []
-        fakeid = authors.get(author_in, "")  # type: ignore
-        logger.info(f"正在获取作者 {author_in} fakeid 为 {fakeid} 的文章列表...")
-        begin = 0  # 起始索引
-        num = 0  # 记录有效文章数量
-        while True:
-            async with aiohttp.ClientSession() as session:
-                headers = {"X-Auth-Key": self.config.get("exporter_auth_key")}
-                params = {"fakeid": fakeid, "begin": begin, "size": 20}
-                try:
-                    async with session.get(
-                        f"{self.config.get('exporter_api_url')}/api/public/v1/article",
-                        headers=headers,
-                        params=params,
-                    ) as resp:
-                        try:
-                            data = await resp.json()
-                            base_resp = data.get("base_resp")
-                            if base_resp and base_resp.get("err_msg") == "ok":
-                                # 处理成功响应
-                                articles = data.get("articles")
-                                logger.info(
-                                    f"第{begin} 获取到 {len(articles) if articles else 0} 篇文章"
-                                )
-                                if articles is None or len(articles) == 0:
-                                    break
-                                for article in articles:
-                                    is_deleted = article.get("is_deleted", False)
-                                    if is_deleted:  # 如果文章被删除了，就不保存
-                                        continue
-                                    write_data.append(article)  # 保存
-                                    num += 1
-                            else:
-                                # 处理失败响应
-                                logger.error(
-                                    f"❌ 获取{author_in}的文章失败: {data.get('base_resp').get('err_msg')}"
-                                )
-                            begin += 20
-                        except (ValueError, KeyError):
-                            logger.error("API 响应解析失败")
-                            break
-                except Exception:
-                    logger.error("获取公众号文章失败")
-                    break
-            logger.debug(f"第{begin}请求，已获取 {num} 篇有效文章")
-            # 休眠防止请求过快被封IP，间隔随机3-5秒
-            random_factor = random.uniform(3, 5)
-            delay = max(5, random_factor)  # 确保间隔至少为5秒
-            await asyncio.sleep(delay)
-        logger.info(f"共获取到 {num} 篇有效文章")
-
-        # 保存数据到本地JSON文件
-        # 1. 获取字符串路径，并显式转换为 Path 对象
-        data_dir_str = get_astrbot_data_path()
-        plugin_data_path = Path(data_dir_str) / "plugin_data" / self.name
-
-        # 2. 创建目录 (此时 plugin_data_path 是 Path 对象，所以 .mkdir() 可用)
-        plugin_data_path.mkdir(parents=True, exist_ok=True)
-        authors_file = plugin_data_path / f"{author_in}.json"
-        data = {"num": num, "articles": write_data}
-        # 3.尝试写入文件
-        try:
-            with authors_file.open("w", encoding="utf-8") as f:
-                json.dump(data, f, ensure_ascii=False, indent=4)
-        except Exception as e:
-            logger.error(f"写入 {author_in}.json 失败: {e}")
 
     async def get_code(self, link: str):
         """解析密令
@@ -1282,35 +1535,14 @@ class MarvelousSnailPlugin(Star):
                 logger.error(f"解析密令 {code} 的月份失败: {e}")
         return valid_codes
 
-    @event_message_type(EventMessageType.ALL)
-    async def send_code(self, event: AstrMessageEvent):
-        """监听所有消息，如果消息中包含“密令”二字，则发送当前有效的密令列表"""
-        if "密令" not in event.message_str:
-            return
-        # 读取密令文件
-        data_dir_str = get_astrbot_data_path()
-        plugin_data_path = Path(data_dir_str) / "plugin_data" / self.name
-        codes_dir = plugin_data_path / "codes"
-        codes_file = codes_dir / "codes.json"
-        codes = {}
-        if codes_file.exists():
-            try:
-                with codes_file.open("r", encoding="utf-8") as f:
-                    data = json.load(f)
-                    codes = data.get("code", {})
-            except Exception as e:
-                logger.error(f"读取密令数据失败: {e}")
-        # 每五十个密令增加一个\n
-        codes_list = list(codes.keys())
-        codes_str = ""
-        for i, code in enumerate(codes_list):
-            codes_str += code
-            if (i + 1) % 50 == 0:
-                codes_str += "\n\n"
-            else:
-                codes_str += "\n"
-        # 发送密令
-        yield event.plain_result(codes_str)
+    @llm_tool("send_code")
+    async def send_code(self, event: AstrMessageEvent) -> None:
+        """发送当前有效密令列表。
+
+        Args:
+            event(object): 当前消息事件。
+        """
+        await self._send_codes_to_event(event)
 
     @command("绑定账号")
     async def get_headers(self, event: AstrMessageEvent, account: str):
@@ -1489,7 +1721,7 @@ class MarvelousSnailPlugin(Star):
             return
 
         content = self._render_user_status_markdown(
-            user_id, event.unified_msg_origin, users
+            user_id, users
         )
         await self._send_status_card(event, content)
 
