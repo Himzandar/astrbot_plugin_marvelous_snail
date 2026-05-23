@@ -1799,10 +1799,13 @@ class MarvelousSnailPlugin(Star):
                             return
                         selected_user = users[index - 1]
                         users.remove(selected_user)
-                        user_data["users"] = users
-                        user_data["num"] = len(users)
-                        with user_file.open("w", encoding="utf-8") as f:
-                            json.dump(user_data, f, ensure_ascii=False, indent=4)
+                        if users:
+                            user_data["users"] = users
+                            user_data["num"] = len(users)
+                            with user_file.open("w", encoding="utf-8") as f:
+                                json.dump(user_data, f, ensure_ascii=False, indent=4)
+                        else:
+                            user_file.unlink(missing_ok=True)
                         logger.info(
                             f"用户 {user_id} 已删除一个绑定角色，剩余 {len(users)} 个"
                         )
@@ -1984,6 +1987,12 @@ class MarvelousSnailPlugin(Star):
         """查看当前定时签到任务进度。"""
         yield event.plain_result(self._format_auto_sign_progress())
 
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    @command("强制执行自动签到")
+    async def force_auto_sign(self, event: AstrMessageEvent):
+        """强制执行自动签到"""
+        await self.auto_sign_in()
+
     @zqwn.command("help")
     async def show_help(self, event: AstrMessageEvent):
         """查看普通用户可用指令。"""
@@ -2025,14 +2034,20 @@ class MarvelousSnailPlugin(Star):
 
         # 使用系统级随机源打乱用户签到顺序，避免每天看起来都是同一批用户先签到。
         self.randomizer.shuffle(user_files)
+        started_at = time.time()
         summary_lines: list[str] = []
+        total_account_count = 0
+        success_account_count = 0
+        failed_account_count = 0
+        success_user_count = 0
+        failed_user_count = 0
         self._set_auto_sign_progress(
             running=True,
             total_users=len(user_files),
             completed_users=0,
             current_user=None,
             current_role=None,
-            started_at=time.time(),
+            started_at=started_at,
         )
 
         try:
@@ -2040,6 +2055,9 @@ class MarvelousSnailPlugin(Star):
             for index, user_file in enumerate(user_files, start=1):
                 user_id = user_file.stem
                 success_count = 0
+                failed_count = 0
+                account_count = 0
+                invalid_account_count = 0
                 self._set_auto_sign_progress(
                     running=True,
                     completed_users=index - 1,
@@ -2052,8 +2070,9 @@ class MarvelousSnailPlugin(Star):
                         logger.error(
                             f"未找到用户 {user_id} 的绑定数据文件，无法执行签到"
                         )
+                        failed_user_count += 1
                         summary_lines.append(
-                            f"- 用户ID: {user_id}，成功签到账号数量: 0"
+                            f"- 用户ID: {user_id}，账号总数: 0，成功: 0，失败: 0"
                         )
                         continue
                     # 读取用户数据
@@ -2064,8 +2083,9 @@ class MarvelousSnailPlugin(Star):
                             logger.warning(
                                 f"用户 {user_id} 没有可用的绑定角色，跳过定时签到"
                             )
+                            failed_user_count += 1
                             summary_lines.append(
-                                f"- 用户ID: {user_id}，成功签到账号数量: 0"
+                                f"- 用户ID: {user_id}，账号总数: 0，成功: 0，失败: 0"
                             )
                             continue
                         # 同一角色可能被重复绑定，这里只保留最后一份，避免重复签到与重复统计。
@@ -2081,9 +2101,14 @@ class MarvelousSnailPlugin(Star):
                                     user, "invalid", "角色绑定数据已损坏"
                                 )
                                 writer_data.append(user)
+                                invalid_account_count += 1
+                                failed_count += 1
+                                failed_account_count += 1
                                 continue
                             unique_users[role_id] = user
                         users = list(unique_users.values())
+                        account_count = len(users) + invalid_account_count
+                        total_account_count += account_count
                         # 进一步打乱同一用户下各账号的签到顺序，避免多账号用户每天顺序固定。
                         self.randomizer.shuffle(users)
                         for user in users:
@@ -2105,6 +2130,8 @@ class MarvelousSnailPlugin(Star):
                                     user, "invalid", "账号数据解密失败"
                                 )
                                 writer_data.append(user)
+                                failed_count += 1
+                                failed_account_count += 1
                                 continue
 
                             info = user.get("info", "")
@@ -2117,6 +2144,8 @@ class MarvelousSnailPlugin(Star):
                                 )
                                 logger.error(f"获取角色信息失败: {info or user_id}")
                                 writer_data.append(user)
+                                failed_count += 1
+                                failed_account_count += 1
                                 continue
                             matched = False
                             for user_server_data in users_server_data:
@@ -2135,6 +2164,8 @@ class MarvelousSnailPlugin(Star):
                                             user, "invalid", "角色数据异常"
                                         )
                                         writer_data.append(user)
+                                        failed_count += 1
+                                        failed_account_count += 1
                                         break
 
                                     result = await binds_account(self.headers, payload)
@@ -2149,6 +2180,7 @@ class MarvelousSnailPlugin(Star):
                                             # “已领取过”也会被判定为成功，因此这里的计数代表
                                             # 当天该用户成功完成或已完成签到的账号数量。
                                             success_count += 1
+                                            success_account_count += 1
                                             # 休眠3-5秒，防止请求过快被封IP，间隔随机8-15秒
                                             random_factor = random.uniform(8, 15)
                                             delay = max(
@@ -2161,6 +2193,8 @@ class MarvelousSnailPlugin(Star):
                                                 "failed",
                                                 sign_result.get("message", "签到失败"),
                                             )
+                                            failed_count += 1
+                                            failed_account_count += 1
                                     else:
                                         error_message = result.get(
                                             "message", "未知错误"
@@ -2168,6 +2202,8 @@ class MarvelousSnailPlugin(Star):
                                         self._set_user_sign_status(
                                             user, "failed", error_message
                                         )
+                                        failed_count += 1
+                                        failed_account_count += 1
                                     writer_data.append(user)
                                     break
                             if not matched:
@@ -2178,10 +2214,13 @@ class MarvelousSnailPlugin(Star):
                                     user, "failed", "未找到最新角色信息"
                                 )
                                 writer_data.append(user)
+                                failed_count += 1
+                                failed_account_count += 1
                 except Exception as e:
                     logger.error(f"读取用户 {user_id} 的数据失败: {e}")
+                    failed_user_count += 1
                     summary_lines.append(
-                        f"- 用户ID: {user_id}，成功签到账号数量: {success_count}"
+                        f"- 用户ID: {user_id}，账号总数: {account_count}，成功: {success_count}，失败: {failed_count}"
                     )
                     continue
                 # 更新文件数据写入
@@ -2194,9 +2233,13 @@ class MarvelousSnailPlugin(Star):
                 except Exception as e:
                     logger.error(f"写回用户 {user_id} 的签到数据失败: {e}")
                     continue
+                if success_count > 0:
+                    success_user_count += 1
+                else:
+                    failed_user_count += 1
                 logger.info(f"用户 {user_id} 的定时签到已完成")
                 summary_lines.append(
-                    f"- 用户ID: {user_id}，成功签到账号数量: {success_count}"
+                    f"- 用户ID: {user_id}，账号总数: {account_count}，成功: {success_count}，失败: {failed_count}"
                 )
                 self._set_auto_sign_progress(
                     running=True,
@@ -2207,7 +2250,18 @@ class MarvelousSnailPlugin(Star):
 
             if group_targets and summary_lines:
                 # 汇总消息统一发往已登记的群聊，并在汇总图后追加当天奖励图。
-                summary_text = "\n".join(summary_lines)
+                duration_seconds = max(0.0, time.time() - started_at)
+                summary_header = [
+                    f"- 签到成功用户数: {success_user_count}",
+                    f"- 签到失败用户数: {failed_user_count}",
+                    f"- 账号总数: {total_account_count}",
+                    f"- 签到成功账号数: {success_account_count}",
+                    f"- 签到失败账号数: {failed_account_count}",
+                    f"- 签到耗时: {duration_seconds:.1f} 秒",
+                    "",
+                    "## 用户明细",
+                ]
+                summary_text = "\n".join(summary_header + summary_lines)
                 reward_image_path = self._get_today_reward_image_path()
                 for group_target in group_targets:
                     try:
