@@ -1815,6 +1815,7 @@ class MarvelousSnailPlugin(Star):
 
                 try:
                     await delete_waiter(event)
+                    event.stop_event()
                 except TimeoutError as _:
                     logger.warning("选择超时！")
                     await event.send(event.plain_result("❌ 选择超时，终止运行"))
@@ -1992,6 +1993,7 @@ class MarvelousSnailPlugin(Star):
     async def force_auto_sign(self, event: AstrMessageEvent):
         """强制执行自动签到"""
         await self.auto_sign_in()
+        event.stop_event()
 
     @zqwn.command("help")
     async def show_help(self, event: AstrMessageEvent):
@@ -2181,8 +2183,8 @@ class MarvelousSnailPlugin(Star):
                                             # 当天该用户成功完成或已完成签到的账号数量。
                                             success_count += 1
                                             success_account_count += 1
-                                            # 休眠3-5秒，防止请求过快被封IP，间隔随机8-15秒
-                                            random_factor = random.uniform(8, 15)
+                                            # 休眠3-5秒，防止请求过快被封IP，间隔随机3-5秒
+                                            random_factor = random.uniform(3, 5)
                                             delay = max(
                                                 3, random_factor
                                             )  # 确保间隔至少为3秒
