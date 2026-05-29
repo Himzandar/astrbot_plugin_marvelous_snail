@@ -1571,6 +1571,16 @@ class MarvelousSnailPlugin(Star):
         Args:
             account: 账号"
         """
+
+        #撤回用户发送的消息，避免泄露账号信息
+        if isinstance(event, AiocqhttpMessageEvent):  # 判断aiocqhttp平台
+            user_message_id = event.message_obj.message_id
+            if user_message_id:
+                try:
+                    await event.bot.delete_msg(message_id=int(user_message_id))
+                except Exception as e:
+                    logger.error(f"撤回用户消息失败: {e}")
+
         if not self.headers:
             logger.warning("尝试绑定账号，但插件未配置可用的 headers")
             await event.send(
@@ -1585,6 +1595,7 @@ class MarvelousSnailPlugin(Star):
             \n3. 数据安全：所有数据服务器端**AES加密存储**，不明文存储、不泄露、不转卖、不共享、不对外传输任何第三方。\
             \n4. 你的全部法定权利：随时查询本人数据、随时一键删除全部数据、撤回本次授权。\
             \n5. 本服务全程无偿、无商业盈利、非经营性个人互助服务。\
+            \n6. 风险提示：可能存在账号被封或奖励追回风险，请谨慎评估后自愿授权绑定,风险自负。\
             \n请你确认全部内容并自愿授权，后续【选择角色】即视为自愿授权信息并完成完成绑定。"
         await event.send(event.plain_result(info))
         users_data = await get_server(account)
@@ -1619,9 +1630,7 @@ class MarvelousSnailPlugin(Star):
                 return
             if isinstance(event, AiocqhttpMessageEvent):  # 判断aiocqhttp平台
                 if message_id:
-                    await event.bot.delete_msg(
-                        message_id=message_id
-                    )  # 用户响应撤回消息
+                    await event.bot.delete_msg(message_id=int(message_id))
                     message_id = None
 
             if len(parts) == 1 and parts[0].isdigit():
@@ -2000,7 +2009,7 @@ class MarvelousSnailPlugin(Star):
         """查看普通用户可用指令。"""
         help_text = (
             "【最强蜗牛插件帮助】\n"
-            "绑定账号 <手机号>\n"
+            "绑定账号 <手机号> (例:/绑定账号 1234567890)\n"
             "查询绑定\n"
             "注销绑定\n"
             "定时签到推送 开启|关闭\n"
