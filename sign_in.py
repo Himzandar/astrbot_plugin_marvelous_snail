@@ -100,7 +100,7 @@ async def sign_request(headers, sign_app_id: str = app_id):
         签到结果的 JSON 数据
     """
     url = f"{api}/game/sign/record"
-    payload = f"app_id={sign_app_id}&page_id={page_id}&game_id={sign_app_id}".encode()
+    payload = f"app_id={app_id}&page_id={page_id}&game_id={sign_app_id}".encode()
     data = await _request_json("post", url, headers=headers, data=payload)
     if not isinstance(data, dict):
         return {"code": -1, "message": "签到请求失败"}
