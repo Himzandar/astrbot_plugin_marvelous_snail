@@ -210,6 +210,20 @@ class MarvelousSnailPlugin(Star):
         return "未知错误"
 
     @staticmethod
+    def _get_server_type_name(app_id: Any) -> str:
+        """根据 app_id 返回服务器类型名称。"""
+        if str(app_id) == "26":
+            return "光子服"
+        if str(app_id) == "39":
+            return "官服"
+        return "未知服"
+
+    @staticmethod
+    def _get_bound_app_id(user_data: dict[str, Any]) -> str:
+        """读取绑定数据中的 app_id，兼容旧数据默认回退到官服。"""
+        return str(user_data.get("app_id", "39"))
+
+    @staticmethod
     def _format_role_info(user_data: dict[str, Any]) -> str:
         """格式化角色信息，用于日志和用户显示"""
         extra = user_data.get("extra")
@@ -219,7 +233,10 @@ class MarvelousSnailPlugin(Star):
 
         server_name = user_data.get("server_name", "未知区服")
         role_name = user_data.get("role_name", "未知角色")
-        return f"{server_name}-{role_name}:{score}"
+        server_type = MarvelousSnailPlugin._get_server_type_name(
+            user_data.get("app_id")
+        )
+        return f"[{server_type}] {server_name}-{role_name}:{score}"
 
     def _set_auto_sign_progress(
         self,
@@ -1578,7 +1595,7 @@ class MarvelousSnailPlugin(Star):
             account: 账号"
         """
 
-        #撤回用户发送的消息，避免泄露账号信息
+        # 撤回用户发送的消息，避免泄露账号信息
         if isinstance(event, AiocqhttpMessageEvent):  # 判断aiocqhttp平台
             user_message_id = event.message_obj.message_id
             if user_message_id:
@@ -1645,6 +1662,7 @@ class MarvelousSnailPlugin(Star):
                     return
                 selected_user = users_data[index - 1]
                 selected_info = self._format_role_info(selected_user)
+                selected_app_id = str(selected_user.get("app_id", "39"))
                 logger.info(f"开始绑定角色: {selected_info}")
                 try:
                     payload = convert_to_query_bytes(selected_user, account)
@@ -1662,7 +1680,7 @@ class MarvelousSnailPlugin(Star):
                         event.plain_result(f"✅ 绑定成功: {selected_info}")
                     )
                     # 首次绑定执行一次签到
-                    sign_result = await sign_request(self.headers)
+                    sign_result = await sign_request(self.headers, selected_app_id)
                     sign_ok = self._is_sign_success(sign_result)
                     await event.send(
                         event.plain_result(
@@ -1697,6 +1715,7 @@ class MarvelousSnailPlugin(Star):
                             {
                                 "account": encrypted_account,
                                 "role_id": encrypted_role_id,
+                                "app_id": selected_app_id,
                                 "info": selected_info,
                                 "sign_status": self._build_sign_status(
                                     "success" if sign_ok else "failed",
@@ -1713,6 +1732,7 @@ class MarvelousSnailPlugin(Star):
                                 {
                                     "account": encrypted_account,
                                     "role_id": encrypted_role_id,
+                                    "app_id": selected_app_id,
                                     "info": selected_info,
                                     "sign_status": self._build_sign_status(
                                         "success" if sign_ok else "failed",
@@ -1863,6 +1883,7 @@ class MarvelousSnailPlugin(Star):
             success_count = 0
             for user in users:
                 info = user.get("info", "未知角色")
+                bound_app_id = self._get_bound_app_id(user)
                 try:
                     account = decrypt_data(user["account"])
                     role_id = decrypt_data(user["role_id"])
@@ -1884,7 +1905,13 @@ class MarvelousSnailPlugin(Star):
                     continue
                 flag = False
                 for user_data_item in users_data:
-                    if user_data_item.get("role_id") == role_id:
+                    current_app_id = self._get_bound_app_id(user_data_item)
+                    if (
+                        user_data_item.get("role_id") == role_id
+                        and current_app_id == bound_app_id
+                    ):
+                        user["app_id"] = current_app_id
+                        user["info"] = self._format_role_info(user_data_item)
                         try:
                             payload = convert_to_query_bytes(user_data_item, account)
                         except Exception as exc:
@@ -1898,7 +1925,9 @@ class MarvelousSnailPlugin(Star):
 
                         result = await binds_account(self.headers, payload)
                         if result.get("code") == 200:
-                            sign_result = await sign_request(self.headers)
+                            sign_result = await sign_request(
+                                self.headers, current_app_id
+                            )
                             if self._is_sign_success(sign_result):
                                 self._set_user_sign_status(
                                     user,
@@ -2122,7 +2151,8 @@ class MarvelousSnailPlugin(Star):
                                 failed_count += 1
                                 failed_account_count += 1
                                 continue
-                            unique_users[role_id] = user
+                            bound_app_id = self._get_bound_app_id(user)
+                            unique_users[(role_id, bound_app_id)] = user
                         users = list(unique_users.values())
                         account_count = len(users) + invalid_account_count
                         total_account_count += account_count
@@ -2130,6 +2160,7 @@ class MarvelousSnailPlugin(Star):
                         self.randomizer.shuffle(users)
                         for user in users:
                             info = user.get("info", "未知角色")
+                            bound_app_id = self._get_bound_app_id(user)
                             self._set_auto_sign_progress(
                                 running=True,
                                 completed_users=index - 1,
@@ -2166,8 +2197,15 @@ class MarvelousSnailPlugin(Star):
                                 continue
                             matched = False
                             for user_server_data in users_server_data:
-                                if user_server_data.get("role_id") == role_id:
+                                current_app_id = self._get_bound_app_id(
+                                    user_server_data
+                                )
+                                if (
+                                    user_server_data.get("role_id") == role_id
+                                    and current_app_id == bound_app_id
+                                ):
                                     matched = True
+                                    user["app_id"] = current_app_id
                                     user["info"] = self._format_role_info(
                                         user_server_data
                                     )
@@ -2187,7 +2225,9 @@ class MarvelousSnailPlugin(Star):
 
                                     result = await binds_account(self.headers, payload)
                                     if result.get("code") == 200:
-                                        sign_result = await sign_request(self.headers)
+                                        sign_result = await sign_request(
+                                            self.headers, current_app_id
+                                        )
                                         if self._is_sign_success(sign_result):
                                             self._set_user_sign_status(
                                                 user,

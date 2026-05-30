@@ -1,6 +1,4 @@
 # sign_in.py
-import base64
-
 import aiohttp
 
 from astrbot.api import logger
@@ -49,13 +47,30 @@ async def get_server(account: str):
         return None
 
     if datas.get("code") == 200:
-        get_keys = ["data", "39", "android"]
-        for key in get_keys:
-            datas = datas.get(key, {})
-            if not datas:
-                logger.warning(f"查询账号角色时缺少字段: {key}")
-                return None
-        return datas
+        data_dict = datas.get("data", {})
+        server_keys = [
+            server_key for server_key in ("39", "26") if server_key in data_dict
+        ]
+        if not server_keys:
+            logger.warning("查询账号角色时缺少字段: 39 或 26")
+            return None
+
+        merged_android_data = []
+        for server_key in server_keys:
+            server_data = data_dict.get(server_key, {})
+            android_data = server_data.get("android")
+            if not android_data:
+                logger.warning(f"查询账号角色时缺少字段: android ({server_key})")
+                continue
+
+            for character in android_data:
+                if isinstance(character, dict):
+                    character["app_id"] = server_key
+                    merged_android_data.append(character)
+
+        if not merged_android_data:
+            return None
+        return merged_android_data
 
     logger.warning(f"查询账号角色失败: {datas.get('message', '未知错误')}")
     return None
@@ -76,15 +91,16 @@ async def binds_account(headers, payload):
     return data
 
 
-async def sign_request(headers):
+async def sign_request(headers, sign_app_id: str = app_id):
     """执行签到请求
     Args:
         headers: 请求头
+        sign_app_id: 签到所属服务器的 app_id
     Returns:
         签到结果的 JSON 数据
     """
     url = f"{api}/game/sign/record"
-    payload = base64.b64decode("YXBwX2lkPTM5JnBhZ2VfaWQ9MSZnYW1lX2lkPTM5")
+    payload = f"app_id={sign_app_id}&page_id={page_id}&game_id={sign_app_id}".encode()
     data = await _request_json("post", url, headers=headers, data=payload)
     if not isinstance(data, dict):
         return {"code": -1, "message": "签到请求失败"}
