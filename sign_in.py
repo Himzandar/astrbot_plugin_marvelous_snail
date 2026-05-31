@@ -91,17 +91,145 @@ async def binds_account(headers, payload):
     return data
 
 
-async def sign_request(headers, sign_app_id: str = app_id):
-    """执行签到请求
+async def sign_request(headers, game_id: str = "39"):
+    """执行每日签到请求
     Args:
         headers: 请求头
-        sign_app_id: 签到所属服务器的 app_id
+        game_id: 签到所属服务器的 game_id
     Returns:
         签到结果的 JSON 数据
     """
     url = f"{api}/game/sign/record"
-    payload = f"app_id={app_id}&page_id={page_id}&game_id={sign_app_id}".encode()
+    payload = f"app_id={app_id}&page_id={page_id}&game_id={game_id}".encode()
     data = await _request_json("post", url, headers=headers, data=payload)
     if not isinstance(data, dict):
         return {"code": -1, "message": "签到请求失败"}
     return data
+
+
+async def activity_gift_inquiry(headers, game_id, role_id):
+    """活动礼包查询请求
+    Args:
+        headers: 请求头
+        game_id: 查询所属服务器的 game_id
+        role_id: 角色 ID
+    Returns:
+        活动礼包信息的 JSON 数据
+    """
+    week_page_id = "7"
+    url = (
+        f"{api}/game/package/list?area=QC-GAME&game_id={game_id}"
+        f"&role_id={role_id}&page_id={week_page_id}&app_id={app_id}"
+    )
+    data = await _request_json("get", url, headers=headers)
+    if not isinstance(data, dict):
+        return {"code": -1, "message": "查询活动礼包信息请求失败"}
+    return data
+
+
+async def activity_gift_data_parse(activity_data):
+    """解析活动礼包数据，提取礼包名称和领取状态
+    Args:
+        activity_data: 活动礼包的 JSON 数据
+    Returns:
+        包含礼包名称和领取状态的列表
+    """
+    if activity_data.get("code") != 200:
+        logger.warning(f"活动礼包数据异常: {activity_data.get('message', '未知错误')}")
+        return []
+
+    data_payload = activity_data.get("data", {})
+    if not isinstance(data_payload, dict):
+        logger.warning(f"活动礼包 data 字段格式异常: {data_payload}")
+        return []
+
+    data_list = data_payload.get("list", [])
+    if not isinstance(data_list, list):
+        logger.warning(f"活动礼包 list 字段格式异常: {data_list}")
+        return []
+
+    parsed_activities = []
+    for item in data_list:
+        if isinstance(item, dict):
+            name = item.get("name", "")
+            gift_id = item.get("id", "")
+            is_get = item.get("is_get", True)
+            parsed_activities.append({"name": name, "id": gift_id, "is_get": is_get})
+        else:
+            logger.warning(f"活动礼包数据项格式异常: {item}")
+    return parsed_activities
+
+
+async def activity_gift_request(headers, activity_gift_datas, game_id: str = "39"):
+    """活动礼包请求
+    Args:
+        headers: 请求头
+        activity_gift_datas: 活动礼包数据列表，包含礼包 ID 和领取状态
+        game_id: 查询所属服务器的 game_id
+    Returns:
+        活动礼包信息的 JSON 数据
+    """
+    activity_gift_page_id = "7"
+    response_data = []
+    if not activity_gift_datas:
+        return {"code": -1, "message": "没有可领取的活动礼包"}
+    for gift_data in activity_gift_datas:
+        if gift_data.get("is_get") is False:
+            package_id = gift_data.get("id")
+            url = f"{api}/game/package"
+            payload = (
+                f"game_id={game_id}&package_id={package_id}"
+                f"&page_id={activity_gift_page_id}&app_id={app_id}"
+            ).encode()
+            data = await _request_json("post", url, headers=headers, data=payload)
+            if not isinstance(data, dict):
+                response_data.append(
+                    {
+                        "code": -1,
+                        "gift_name": gift_data.get("name", ""),
+                        "message": f"领取礼包 {gift_data.get('name', '')} 请求失败",
+                    }
+                )
+            else:
+                response_data.append(
+                    {
+                        "code": data.get("code", -1),
+                        "gift_name": gift_data.get("name", ""),
+                        "message": (
+                            f"<{gift_data.get('name', '')}>: "
+                            f"{data.get('message', '未知错误')}"
+                        ),
+                    }
+                )
+    return response_data
+
+
+async def activity_gift_claim(headers, game_id: str, role_id: str):
+    """查询并领取当前角色的活动礼包。"""
+    inquiry_data = await activity_gift_inquiry(headers, game_id, role_id)
+    if not isinstance(inquiry_data, dict):
+        return [{"code": -1, "message": "查询活动礼包信息请求失败"}]
+
+    if inquiry_data.get("code") != 200:
+        return [
+            {
+                "code": inquiry_data.get("code", -1),
+                "message": inquiry_data.get("message", "查询活动礼包信息请求失败"),
+            }
+        ]
+
+    activity_gift_datas = await activity_gift_data_parse(inquiry_data)
+    claimable_gifts = [
+        gift_data
+        for gift_data in activity_gift_datas
+        if isinstance(gift_data, dict) and gift_data.get("is_get") is False
+    ]
+    if not claimable_gifts:
+        return []
+
+    response_data = await activity_gift_request(headers, claimable_gifts, game_id)
+    if isinstance(response_data, list):
+        return response_data
+    if isinstance(response_data, dict):
+        return [response_data]
+    return [{"code": -1, "message": "领取活动礼包请求失败"}]

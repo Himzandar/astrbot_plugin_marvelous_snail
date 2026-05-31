@@ -1,0 +1,12 @@
+{
+    "官服":[ 
+        { "phone": "手机号1", "uid": ["XXXXXXXXXXXXXX"]},
+        { "phone": "手机号2", "uid": ["AAAAAAAAAAAAAAA", "BBBBBBBBBBBBBBB"]},
+        { "phone": "手机号3", "uid": ["DDDDDDDDDDDDDDD", "EEEEEEEEEEEEEEE", "FFFFFFFFFFFFFFF"]}
+    ],
+    "光子服":[
+        { "phone": "手机号4", "uid": ["YYYYYYYYYYYYYYY"]},
+        { "phone": "手机号5", "uid": ["DDDDDDDDDDDDDDD", "EEEEEEEEEEEEEEE"]},
+        { "phone": "手机号6", "uid": ["GGGGGGGGGGGGGGG", "HHHHHHHHHHHHHHH", "IIIIIIIIIIIIIII"]}
+    ]
+}

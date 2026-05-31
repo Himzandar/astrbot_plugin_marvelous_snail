@@ -31,7 +31,7 @@ from astrbot.core.utils.session_waiter import SessionController, session_waiter
 
 from .code import parse_code
 from .parse import Parse
-from .sign_in import binds_account, get_server, sign_request
+from .sign_in import activity_gift_claim, binds_account, get_server, sign_request
 from .utils import (
     convert_to_query_bytes,
     cron_to_human,
@@ -97,6 +97,11 @@ class MarvelousSnailPlugin(Star):
         if self.headers:
             await self._start_auto_job(
                 "auto_sign_in_job", "10 8 * * *", self.auto_sign_in
+            )
+            await self._start_auto_job(
+                "auto_activity_gift_job",
+                "0 9 * * 5",
+                self.auto_activity_gift_sign_in,
             )
             # headers心跳保持，每30分钟执行一次签到请求，保持 session 有效
             await self._start_auto_job(
@@ -601,6 +606,85 @@ class MarvelousSnailPlugin(Star):
         self, user: dict[str, Any], state: str, message: str
     ) -> None:
         user["sign_status"] = self._build_sign_status(state, message)
+
+    def _summarize_activity_gift_results(
+        self, gift_results: Any
+    ) -> dict[str, Any]:
+        """汇总活动礼包领取结果。"""
+        if not isinstance(gift_results, list):
+            return {
+                "success_count": 0,
+                "failed_count": 1,
+                "messages": ["活动礼包领取结果无效"],
+                "claimed_gifts": [],
+                "failed_gifts": [],
+            }
+
+        success_count = 0
+        failed_count = 0
+        messages: list[str] = []
+        claimed_gifts: list[str] = []
+        failed_gifts: list[str] = []
+        for result in gift_results:
+            if not isinstance(result, dict):
+                failed_count += 1
+                messages.append("活动礼包领取结果格式异常")
+                continue
+
+            message = str(result.get("message", "未知结果"))
+            messages.append(message)
+            gift_name = str(result.get("gift_name", "")).strip()
+            if result.get("code") == 200:
+                success_count += 1
+                if gift_name:
+                    claimed_gifts.append(gift_name)
+            else:
+                failed_count += 1
+                if gift_name:
+                    failed_gifts.append(gift_name)
+
+        return {
+            "success_count": success_count,
+            "failed_count": failed_count,
+            "messages": messages,
+            "claimed_gifts": claimed_gifts,
+            "failed_gifts": failed_gifts,
+        }
+
+    async def _claim_activity_gifts_for_role(
+        self, game_id: str, role_id: str
+    ) -> dict[str, Any]:
+        """执行单个角色的活动礼包领取。"""
+        if not self.headers:
+            return {
+                "success_count": 0,
+                "failed_count": 1,
+                "messages": ["未配置活动礼包请求头"],
+                "claimed_gifts": [],
+                "failed_gifts": [],
+                "has_claim_attempt": True,
+            }
+
+        gift_results = await activity_gift_claim(self.headers, game_id, role_id)
+        if not gift_results:
+            return {
+                "success_count": 0,
+                "failed_count": 0,
+                "messages": ["没有可领取的活动礼包"],
+                "claimed_gifts": [],
+                "failed_gifts": [],
+                "has_claim_attempt": False,
+            }
+
+        summary = self._summarize_activity_gift_results(gift_results)
+        return {
+            "success_count": summary["success_count"],
+            "failed_count": summary["failed_count"],
+            "messages": summary["messages"],
+            "claimed_gifts": summary["claimed_gifts"],
+            "failed_gifts": summary["failed_gifts"],
+            "has_claim_attempt": True,
+        }
 
     def _format_sign_status(self, user: dict[str, Any]) -> tuple[str, str, str]:
         sign_status = user.get("sign_status")
@@ -1676,15 +1760,29 @@ class MarvelousSnailPlugin(Star):
 
                 result = await binds_account(self.headers, payload)
                 if result.get("code") == 200:
-                    await event.send(
-                        event.plain_result(f"✅ 绑定成功: {selected_info}")
-                    )
                     # 首次绑定执行一次签到
                     sign_result = await sign_request(self.headers, selected_app_id)
                     sign_ok = self._is_sign_success(sign_result)
+                    gift_summary = await self._claim_activity_gifts_for_role(
+                        selected_app_id,
+                        str(selected_user["role_id"]),
+                    )
+                    gift_prefix = "✅" if gift_summary["success_count"] > 0 else "ℹ️"
                     await event.send(
                         event.plain_result(
-                            f"{'✅' if sign_ok else '❌'} 首次绑定执行签到: {sign_result.get('message', '未知结果')}"
+                            "\n".join(
+                                [
+                                    f"✅ 绑定成功: {selected_info}",
+                                    (
+                                        f"{'✅' if sign_ok else '❌'} 首次绑定执行签到: "
+                                        f"{sign_result.get('message', '未知结果')}"
+                                    ),
+                                    (
+                                        f"{gift_prefix} 活动礼包结果: "
+                                        + "；".join(gift_summary["messages"])
+                                    ),
+                                ]
+                            )
                         )
                     )
                     # 加密保存数据
@@ -1859,128 +1957,6 @@ class MarvelousSnailPlugin(Star):
             await event.send(event.plain_result("❌ 读取数据失败"))
             return
 
-    @filter.permission_type(filter.PermissionType.ADMIN)
-    @command("签到")
-    async def sign(self, event: AstrMessageEvent):
-        """签到功能，查询已绑定的角色，选择后执行签到"""
-        if not self.headers:
-            logger.warning("尝试执行签到，但插件未配置可用的 headers")
-            await event.send(event.plain_result("❌ 未配置签到请求头，暂时无法签到"))
-            return
-
-        user_id = event.get_sender_id()
-        user_id = user_id.replace("/", "_")
-        user_data = self._load_user_data(user_id)
-        if not user_data:
-            await event.send(event.plain_result("❌ 未找到绑定数据"))
-            return
-
-        try:
-            users = user_data.get("users", [])
-            if not isinstance(users, list) or len(users) == 0:
-                await event.send(event.plain_result("❌ 未找到绑定数据"))
-                return
-            success_count = 0
-            for user in users:
-                info = user.get("info", "未知角色")
-                bound_app_id = self._get_bound_app_id(user)
-                try:
-                    account = decrypt_data(user["account"])
-                    role_id = decrypt_data(user["role_id"])
-                except Exception as exc:
-                    logger.error(f"解密角色绑定数据失败: {exc}")
-                    self._set_user_sign_status(user, "invalid", "绑定数据已损坏")
-                    await event.send(
-                        event.plain_result(f"❌ {info} 的绑定数据已损坏，已跳过")
-                    )
-                    continue
-
-                users_data = await get_server(account)
-                if users_data is None or len(users_data) == 0:
-                    logger.error(f"获取角色信息失败: {info}")
-                    self._set_user_sign_status(user, "failed", "获取角色信息失败")
-                    await event.send(
-                        event.plain_result(f"❌ {info} 获取角色信息失败，已跳过")
-                    )
-                    continue
-                flag = False
-                for user_data_item in users_data:
-                    current_app_id = self._get_bound_app_id(user_data_item)
-                    if (
-                        user_data_item.get("role_id") == role_id
-                        and current_app_id == bound_app_id
-                    ):
-                        user["app_id"] = current_app_id
-                        user["info"] = self._format_role_info(user_data_item)
-                        try:
-                            payload = convert_to_query_bytes(user_data_item, account)
-                        except Exception as exc:
-                            logger.error(f"编码签到数据失败: {exc}")
-                            self._set_user_sign_status(user, "invalid", "角色数据异常")
-                            await event.send(
-                                event.plain_result(f"❌ {info} 数据异常，无法执行签到")
-                            )
-                            flag = True
-                            break
-
-                        result = await binds_account(self.headers, payload)
-                        if result.get("code") == 200:
-                            sign_result = await sign_request(
-                                self.headers, current_app_id
-                            )
-                            if self._is_sign_success(sign_result):
-                                self._set_user_sign_status(
-                                    user,
-                                    "success",
-                                    sign_result.get("message", "签到成功"),
-                                )
-                                await event.send(
-                                    event.plain_result(
-                                        f"✅ {info} 签到成功: {sign_result.get('message', '未知结果')}"
-                                    )
-                                )
-                                success_count += 1
-                            else:
-                                self._set_user_sign_status(
-                                    user,
-                                    "failed",
-                                    sign_result.get("message", "签到失败"),
-                                )
-                                await event.send(
-                                    event.plain_result(
-                                        f"❌ {info} 签到失败: {sign_result.get('message', '未知结果')}"
-                                    )
-                                )
-                            flag = True
-                            break
-
-                        error_message = result.get("message", "未知错误")
-                        logger.error(
-                            f"签到前绑定失败: {info}，错误信息: {error_message}"
-                        )
-                        self._set_user_sign_status(user, "failed", error_message)
-                        await event.send(
-                            event.plain_result(f"❌ {info} 绑定失败: {error_message}")
-                        )
-                        flag = True
-                        break
-                if not flag:
-                    logger.error(f"未找到匹配的角色信息: {info}")
-                    self._set_user_sign_status(user, "failed", "未找到最新角色信息")
-                    await event.send(
-                        event.plain_result(f"❌ {info} 未找到最新角色信息")
-                    )
-
-            user_data["users"] = users
-            user_data["num"] = len(users)
-            self._save_user_data(user_id, user_data)
-            if success_count == 0:
-                logger.warning(f"用户 {user_id} 本次签到没有成功的角色")
-        except Exception as e:
-            logger.error(f"读取用户数据失败: {e}")
-            await event.send(event.plain_result("❌ 读取数据失败"))
-            return
-
     @command("定时签到推送")
     async def schedule_sign(self, event: AstrMessageEvent, enabled: str):
         """定时签到推送开关
@@ -2036,10 +2012,11 @@ class MarvelousSnailPlugin(Star):
     @command("强制执行自动签到")
     async def force_auto_sign(self, event: AstrMessageEvent):
         """强制执行自动签到"""
-        await self.auto_sign_in()
+        # await self.auto_sign_in()
+        # await self.auto_activity_gift_sign_in()
         event.stop_event()
 
-    @zqwn.command("help")
+    @command("最强蜗牛help")
     async def show_help(self, event: AstrMessageEvent):
         """查看普通用户可用指令。"""
         help_text = (
@@ -2341,6 +2318,160 @@ class MarvelousSnailPlugin(Star):
                 current_role=None,
                 last_finished_at=time.time(),
             )
+
+    async def auto_activity_gift_sign_in(self):
+        """每周活动礼包定时领取，与每日定时签到共用同一批绑定账号。"""
+        if not self.headers:
+            logger.info("未配置 headers，跳过每周活动礼包任务")
+            return
+
+        if not self.read_file("push_datas", "sign.json"):
+            logger.info("未找到定时签到推送数据文件，跳过每周活动礼包任务")
+            return
+
+        group_targets = self._get_group_sign_push_targets()
+        user_dir = self._get_user_dir()
+        if not user_dir.exists():
+            logger.info("未找到用户绑定目录，跳过每周活动礼包任务")
+            return
+
+        user_files = list(user_dir.glob("*.json"))
+        if not user_files:
+            logger.info("用户绑定目录为空，跳过每周活动礼包任务")
+            return
+
+        self.randomizer.shuffle(user_files)
+        started_at = time.time()
+        summary_lines: list[str] = []
+        total_account_count = 0
+        success_account_count = 0
+        failed_account_count = 0
+        skipped_account_count = 0
+        success_user_count = 0
+        failed_user_count = 0
+        skipped_user_count = 0
+
+        for user_file in user_files:
+            user_id = user_file.stem
+            success_count = 0
+            failed_count = 0
+            skipped_count = 0
+            account_count = 0
+            invalid_account_count = 0
+            role_summary_lines: list[str] = []
+
+            try:
+                with user_file.open("r", encoding="utf-8") as f:
+                    user_data = json.load(f)
+            except Exception as exc:
+                logger.error(f"读取用户 {user_id} 的数据失败: {exc}")
+                failed_user_count += 1
+                summary_lines.append(
+                    f"- 用户ID: {user_id}，账号总数: 0，成功: 0，失败: 0"
+                )
+                continue
+
+            users = user_data.get("users", [])
+            if not isinstance(users, list) or not users:
+                logger.warning(f"用户 {user_id} 没有可用的绑定角色，跳过活动礼包任务")
+                failed_user_count += 1
+                summary_lines.append(
+                    f"- 用户ID: {user_id}，账号总数: 0，成功: 0，失败: 0"
+                )
+                continue
+
+            unique_users = {}
+            for user in users:
+                try:
+                    role_id = decrypt_data(user["role_id"])
+                except Exception as exc:
+                    logger.error(f"解密用户 {user_id} 的角色数据失败: {exc}")
+                    invalid_account_count += 1
+                    failed_count += 1
+                    failed_account_count += 1
+                    continue
+                bound_app_id = self._get_bound_app_id(user)
+                unique_users[(role_id, bound_app_id)] = user
+
+            role_entries = list(unique_users.items())
+            account_count = len(role_entries) + invalid_account_count
+            total_account_count += account_count
+            self.randomizer.shuffle(role_entries)
+
+            for (role_id, bound_app_id), user in role_entries:
+                info = user.get("info", "未知角色")
+                gift_summary = await self._claim_activity_gifts_for_role(
+                    bound_app_id,
+                    role_id,
+                )
+                if gift_summary["success_count"] > 0:
+                    success_count += 1
+                    success_account_count += 1
+                elif gift_summary["failed_count"] > 0:
+                    failed_count += 1
+                    failed_account_count += 1
+                else:
+                    skipped_count += 1
+                    skipped_account_count += 1
+
+                message = "；".join(gift_summary["messages"])
+                claimed_gifts = gift_summary.get("claimed_gifts", [])
+                failed_gifts = gift_summary.get("failed_gifts", [])
+                detail_parts = [f"角色: {info}"]
+                if claimed_gifts:
+                    detail_parts.append(
+                        f"已领取礼包: {'、'.join(str(name) for name in claimed_gifts)}"
+                    )
+                if failed_gifts:
+                    detail_parts.append(
+                        f"失败礼包: {'、'.join(str(name) for name in failed_gifts)}"
+                    )
+                if not claimed_gifts and not failed_gifts:
+                    detail_parts.append("已领取礼包: 无可领取礼包")
+                role_summary_lines.append(f"  - {'；'.join(detail_parts)}")
+                logger.info(f"活动礼包处理完成: {user_id} {info} -> {message}")
+                if gift_summary["has_claim_attempt"]:
+                    await asyncio.sleep(max(3, random.uniform(3, 15)))
+
+            if success_count > 0:
+                success_user_count += 1
+            elif failed_count > 0:
+                failed_user_count += 1
+            else:
+                skipped_user_count += 1
+
+            summary_lines.append(
+                f"- 用户ID: {user_id}，账号总数: {account_count}，成功: {success_count}，失败: {failed_count}，跳过: {skipped_count}"
+            )
+            summary_lines.extend(role_summary_lines)
+
+        if group_targets and summary_lines:
+            duration_seconds = max(0.0, time.time() - started_at)
+            summary_header = [
+                f"- 领取成功用户数: {success_user_count}",
+                f"- 领取失败用户数: {failed_user_count}",
+                f"- 无可领礼包用户数: {skipped_user_count}",
+                f"- 账号总数: {total_account_count}",
+                f"- 领取成功账号数: {success_account_count}",
+                f"- 领取失败账号数: {failed_account_count}",
+                f"- 无可领礼包账号数: {skipped_account_count}",
+                f"- 执行耗时: {duration_seconds:.1f} 秒",
+                "",
+                "## 用户明细",
+            ]
+            summary_text = "\n".join(summary_header + summary_lines)
+            for group_target in group_targets:
+                try:
+                    await self._send_rendered_message(
+                        group_target,
+                        summary_text,
+                        msg="每周活动礼包汇总",
+                    )
+                    logger.info(f"已发送每周活动礼包汇总到群 {group_target}")
+                except Exception as exc:
+                    logger.error(f"发送每周活动礼包汇总到群 {group_target} 失败: {exc}")
+        elif not group_targets:
+            logger.info("未配置群聊定时签到汇总推送目标，已跳过活动礼包汇总发送")
 
     @command("账号统计")
     async def account_statistics(self, event: AstrMessageEvent):
