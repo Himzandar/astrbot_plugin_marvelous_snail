@@ -14,7 +14,13 @@
     "headers": {
         "description": "请求头信息",
         "type": "string",
-        "hint": "需要自行获取binds等接口任意请求头信息，可以直接以字典形式复制过来，注意:去除content-length字段",
+        "hint": "需要自行获取binds接口请求头信息，可以直接以字典形式复制过来，注意:去除content-length字段",
+        "default": "{}"
+    },
+    "user_token": {
+        "description": "user_token",
+        "type": "string",
+        "hint": "需要自行获取最强蜗牛wike请求接口中的user_token参数，否则无法进行wike签到礼包领取",
         "default": "{}"
     }
 }

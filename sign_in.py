@@ -5,7 +5,6 @@ from astrbot.api import logger
 
 api = "https://api.qingcigame.com"
 app_id = "39"
-page_id = "1"
 REQUEST_TIMEOUT = aiohttp.ClientTimeout(total=30)
 
 
@@ -36,6 +35,7 @@ async def get_server(account: str):
     Returns:
         绑定的角色信息，如果查询失败返回 None
     """
+    page_id = "1"
     url = f"{api}/game/server"
     params = {
         "account": account,
@@ -100,6 +100,7 @@ async def sign_request(headers, game_id: str = "39"):
         签到结果的 JSON 数据
     """
     url = f"{api}/game/sign/record"
+    page_id = "1"
     payload = f"app_id={app_id}&page_id={page_id}&game_id={game_id}".encode()
     data = await _request_json("post", url, headers=headers, data=payload)
     if not isinstance(data, dict):
@@ -233,3 +234,5 @@ async def activity_gift_claim(headers, game_id: str, role_id: str):
     if isinstance(response_data, dict):
         return [response_data]
     return [{"code": -1, "message": "领取活动礼包请求失败"}]
+
+

@@ -2107,6 +2107,7 @@ class MarvelousSnailPlugin(Star):
                 failed_count = 0
                 account_count = 0
                 invalid_account_count = 0
+                role_summary_lines: list[str] = []
                 self._set_auto_sign_progress(
                     running=True,
                     completed_users=index - 1,
@@ -2163,6 +2164,7 @@ class MarvelousSnailPlugin(Star):
                         self.randomizer.shuffle(users)
                         for user in users:
                             info = user.get("info", "未知角色")
+                            detail_parts = [f"角色: {info}"]
                             bound_app_id = self._get_bound_app_id(user)
                             self._set_auto_sign_progress(
                                 running=True,
@@ -2183,9 +2185,14 @@ class MarvelousSnailPlugin(Star):
                                 writer_data.append(user)
                                 failed_count += 1
                                 failed_account_count += 1
+                                detail_parts.append("结果: 账号数据解密失败")
+                                role_summary_lines.append(
+                                    f"  - {'；'.join(detail_parts)}"
+                                )
                                 continue
 
                             info = user.get("info", "")
+                            detail_parts = [f"角色: {info or '未知角色'}"]
                             users_server_data = await get_server(
                                 account
                             )  # 获取最新的角色信息，更新info显示
@@ -2197,6 +2204,10 @@ class MarvelousSnailPlugin(Star):
                                 writer_data.append(user)
                                 failed_count += 1
                                 failed_account_count += 1
+                                detail_parts.append("结果: 获取角色信息失败")
+                                role_summary_lines.append(
+                                    f"  - {'；'.join(detail_parts)}"
+                                )
                                 continue
                             matched = False
                             for user_server_data in users_server_data:
@@ -2209,9 +2220,9 @@ class MarvelousSnailPlugin(Star):
                                 ):
                                     matched = True
                                     user["app_id"] = current_app_id
-                                    user["info"] = self._format_role_info(
-                                        user_server_data
-                                    )
+                                    info = self._format_role_info(user_server_data)
+                                    user["info"] = info
+                                    detail_parts = [f"角色: {info}"]
                                     try:
                                         payload = convert_to_query_bytes(
                                             user_server_data, account
@@ -2224,6 +2235,10 @@ class MarvelousSnailPlugin(Star):
                                         writer_data.append(user)
                                         failed_count += 1
                                         failed_account_count += 1
+                                        detail_parts.append("结果: 角色数据异常")
+                                        role_summary_lines.append(
+                                            f"  - {'；'.join(detail_parts)}"
+                                        )
                                         break
 
                                     result = await binds_account(self.headers, payload)
@@ -2231,11 +2246,17 @@ class MarvelousSnailPlugin(Star):
                                         sign_result = await sign_request(
                                             self.headers, current_app_id
                                         )
+                                        sign_message = str(
+                                            sign_result.get("message", "未知结果")
+                                        )
                                         if self._is_sign_success(sign_result):
                                             self._set_user_sign_status(
                                                 user,
                                                 "success",
-                                                sign_result.get("message", "签到成功"),
+                                                sign_message or "签到成功",
+                                            )
+                                            detail_parts.append(
+                                                f"结果: 签到成功({sign_message or '签到成功'})"
                                             )
                                             # “已领取过”也会被判定为成功，因此这里的计数代表
                                             # 当天该用户成功完成或已完成签到的账号数量。
@@ -2251,10 +2272,13 @@ class MarvelousSnailPlugin(Star):
                                             self._set_user_sign_status(
                                                 user,
                                                 "failed",
-                                                sign_result.get("message", "签到失败"),
+                                                sign_message or "签到失败",
                                             )
                                             failed_count += 1
                                             failed_account_count += 1
+                                            detail_parts.append(
+                                                f"结果: 签到失败({sign_message or '签到失败'})"
+                                            )
                                     else:
                                         error_message = result.get(
                                             "message", "未知错误"
@@ -2264,6 +2288,12 @@ class MarvelousSnailPlugin(Star):
                                         )
                                         failed_count += 1
                                         failed_account_count += 1
+                                        detail_parts.append(
+                                            f"结果: 绑定失败({error_message})"
+                                        )
+                                    role_summary_lines.append(
+                                        f"  - {'；'.join(detail_parts)}"
+                                    )
                                     writer_data.append(user)
                                     break
                             if not matched:
@@ -2276,6 +2306,10 @@ class MarvelousSnailPlugin(Star):
                                 writer_data.append(user)
                                 failed_count += 1
                                 failed_account_count += 1
+                                detail_parts.append("结果: 未找到最新角色信息")
+                                role_summary_lines.append(
+                                    f"  - {'；'.join(detail_parts)}"
+                                )
                 except Exception as e:
                     logger.error(f"读取用户 {user_id} 的数据失败: {e}")
                     failed_user_count += 1
@@ -2301,6 +2335,7 @@ class MarvelousSnailPlugin(Star):
                 summary_lines.append(
                     f"- 用户ID: {user_id}，账号总数: {account_count}，成功: {success_count}，失败: {failed_count}"
                 )
+                summary_lines.extend(role_summary_lines)
                 self._set_auto_sign_progress(
                     running=True,
                     completed_users=index,
