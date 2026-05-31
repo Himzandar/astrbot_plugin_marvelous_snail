@@ -405,7 +405,7 @@ class MarvelousSnailPlugin(Star):
         image_paths: list[str],
     ) -> None:
         """向指定目标发送图片聊天记录。"""
-        forward = self._build_forward_nodes(image_paths, "最强蜗牛攻略", "0")
+        forward = self._build_forward_nodes(image_paths, "最强蜗牛签到", "0")
         await self.context.send_message(target, MessageChain(chain=[forward]))  # type: ignore
 
     def _load_valid_codes(self) -> list[str]:
@@ -2302,7 +2302,7 @@ class MarvelousSnailPlugin(Star):
                         await self._send_rendered_message(
                             group_target,
                             summary_text,
-                            msg="定时签到汇总",
+                            msg="定时签到数据",
                             extra_image_path=reward_image_path,
                         )
                         logger.info(f"已发送定时签到汇总到群 {group_target}")
@@ -2465,7 +2465,7 @@ class MarvelousSnailPlugin(Star):
                     await self._send_rendered_message(
                         group_target,
                         summary_text,
-                        msg="每周活动礼包汇总",
+                        msg="每周活动礼包数据",
                     )
                     logger.info(f"已发送每周活动礼包汇总到群 {group_target}")
                 except Exception as exc:
