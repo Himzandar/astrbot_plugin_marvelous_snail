@@ -2426,8 +2426,75 @@ class MarvelousSnailPlugin(Star):
 
             for (role_id, bound_app_id), user in role_entries:
                 info = user.get("info", "未知角色")
+                detail_parts = [f"角色: {info}"]
+                try:
+                    account = decrypt_data(user["account"])
+                except Exception as exc:
+                    logger.error(f"解密用户 {user_id} 的账号数据失败: {exc}")
+                    failed_count += 1
+                    failed_account_count += 1
+                    detail_parts.append("结果: 账号数据解密失败")
+                    role_summary_lines.append(f"  - {'；'.join(detail_parts)}")
+                    continue
+
+                users_server_data = await get_server(account)
+                if users_server_data is None or len(users_server_data) == 0:
+                    logger.error(f"活动礼包任务获取角色信息失败: {info or user_id}")
+                    failed_count += 1
+                    failed_account_count += 1
+                    detail_parts.append("结果: 获取角色信息失败")
+                    role_summary_lines.append(f"  - {'；'.join(detail_parts)}")
+                    continue
+
+                matched_user_data = None
+                current_app_id = bound_app_id
+                for user_server_data in users_server_data:
+                    candidate_app_id = self._get_bound_app_id(user_server_data)
+                    if (
+                        user_server_data.get("role_id") == role_id
+                        and candidate_app_id == bound_app_id
+                    ):
+                        matched_user_data = user_server_data
+                        current_app_id = candidate_app_id
+                        break
+
+                if matched_user_data is None:
+                    logger.warning(f"活动礼包任务未找到匹配角色: {info or user_id}")
+                    failed_count += 1
+                    failed_account_count += 1
+                    detail_parts.append("结果: 未找到最新角色信息")
+                    role_summary_lines.append(f"  - {'；'.join(detail_parts)}")
+                    continue
+
+                user["app_id"] = current_app_id
+                info = self._format_role_info(matched_user_data)
+                user["info"] = info
+                detail_parts = [f"角色: {info}"]
+
+                try:
+                    payload = convert_to_query_bytes(matched_user_data, account)
+                except Exception as exc:
+                    logger.error(f"编码活动礼包绑定数据失败: {exc}")
+                    failed_count += 1
+                    failed_account_count += 1
+                    detail_parts.append("结果: 角色数据异常")
+                    role_summary_lines.append(f"  - {'；'.join(detail_parts)}")
+                    continue
+
+                bind_result = await binds_account(self.headers, payload)
+                if bind_result.get("code") != 200:
+                    error_message = bind_result.get("message", "绑定失败")
+                    logger.warning(
+                        f"活动礼包任务绑定失败: {info} -> {error_message}"
+                    )
+                    failed_count += 1
+                    failed_account_count += 1
+                    detail_parts.append(f"结果: 绑定失败({error_message})")
+                    role_summary_lines.append(f"  - {'；'.join(detail_parts)}")
+                    continue
+
                 gift_summary = await self._claim_activity_gifts_for_role(
-                    bound_app_id,
+                    current_app_id,
                     role_id,
                 )
                 if gift_summary["success_count"] > 0:
@@ -2443,7 +2510,6 @@ class MarvelousSnailPlugin(Star):
                 message = "；".join(gift_summary["messages"])
                 claimed_gifts = gift_summary.get("claimed_gifts", [])
                 failed_gifts = gift_summary.get("failed_gifts", [])
-                detail_parts = [f"角色: {info}"]
                 if claimed_gifts:
                     detail_parts.append(
                         f"已领取礼包: {'、'.join(str(name) for name in claimed_gifts)}"
