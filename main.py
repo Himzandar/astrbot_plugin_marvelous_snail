@@ -327,6 +327,11 @@ class MarvelousSnailPlugin(Star):
         """构造用于图片渲染的 Markdown 文本。"""
         return content if not msg else f"# {msg}\n\n{content}"
 
+    @staticmethod
+    def _is_exit_command(text: str) -> bool:
+        """判断用户是否主动退出当前交互流程。"""
+        return text.strip() in {"退出", "取消", "q", "Q"}
+
     def _split_markdown_chunks(self, content: str, max_lines: int = 50) -> list[str]:
         """按行数切分 Markdown，避免单张图片过长。"""
         lines = content.splitlines()
@@ -840,6 +845,7 @@ class MarvelousSnailPlugin(Star):
         lines = [
             "# 攻略作者列表",
             "请回复编号选择作者：",
+            "回复 退出 或 取消 可结束当前流程。",
             "",
         ]
         for index, author in enumerate(authors, start=1):
@@ -870,6 +876,7 @@ class MarvelousSnailPlugin(Star):
             lines.append("")
 
         lines.append("请回复编号选择文章。")
+        lines.append("回复 退出 或 取消 可结束当前流程。")
         return "\n".join(lines).strip()
 
     def _get_latest_strategy_article(
@@ -1432,6 +1439,10 @@ class MarvelousSnailPlugin(Star):
             if len(parts) == 0:
                 logger.debug("攻略选择流程收到空输入，继续等待用户响应")
                 return
+            if self._is_exit_command(arg):
+                await event.send(event.plain_result("✅ 已退出攻略查询流程"))
+                controller.stop()
+                return
 
             if user_stage == "select_author":
                 arg = event.message_str.strip()
@@ -1448,12 +1459,19 @@ class MarvelousSnailPlugin(Star):
                     plugin_data_path, selected_author, parse_str
                 )
                 if not result or not result.get("data"):
-                    await event.send(
-                        event.plain_result(
-                            result.get("msg", f"❌ 作者 {selected_author} 没有文章数据")
-                        )
+                    message = (
+                        result.get("msg", f"❌ 作者 {selected_author} 没有文章数据")
+                        if isinstance(result, dict)
+                        else f"❌ 作者 {selected_author} 没有文章数据"
                     )
-                    controller.stop()
+                    await event.send(
+                        event.plain_result(f"{message}\n请重新选择作者，或回复 退出 结束流程")
+                    )
+                    await self._send_markdown_card(
+                        event,
+                        self._render_author_selection_markdown(authors),
+                    )
+                    controller.keep(timeout=60, reset_timeout=True)
                     return
                 user_stage = "select_article"
                 results = result["data"]
@@ -1710,7 +1728,7 @@ class MarvelousSnailPlugin(Star):
             await event.send(event.plain_result("❌ 获取数据失败，请检查账号是否正确"))
             return
         # 配置角色菜单信息供用户选择
-        select_info = "选择需要绑定的角色:"
+        select_info = "选择需要绑定的角色:\n回复 退出 或 取消 可结束当前流程。"
         id = 1
         for user_data in users_data:
             select_info += f"\n{id}. {self._format_role_info(user_data)}"
@@ -1734,6 +1752,10 @@ class MarvelousSnailPlugin(Star):
             arg = event.message_str.strip()
             parts = arg.split()
             if len(parts) == 0:
+                return
+            if self._is_exit_command(arg):
+                await event.send(event.plain_result("✅ 已退出绑定流程"))
+                controller.stop()
                 return
             if isinstance(event, AiocqhttpMessageEvent):  # 判断aiocqhttp平台
                 if message_id:
@@ -1900,7 +1922,7 @@ class MarvelousSnailPlugin(Star):
                     await event.send(event.plain_result("❌ 未找到绑定数据"))
                     return
                 # 显示已绑定的账号和角色供用户选择
-                select_info = "选择需要删除的账号:"
+                select_info = "选择需要删除的账号:\n回复 退出 或 取消 可结束当前流程。"
                 id = 1
                 for user in users:
                     select_info += f"\n{id}. {user['info']}"
@@ -1919,6 +1941,10 @@ class MarvelousSnailPlugin(Star):
                     arg = event.message_str.strip()
                     parts = arg.split()
                     if len(parts) == 0:
+                        return
+                    if self._is_exit_command(arg):
+                        await event.send(event.plain_result("✅ 已退出注销流程"))
+                        controller.stop()
                         return
                     if isinstance(event, AiocqhttpMessageEvent):  # 判断aiocqhttp平台
                         if message_id:
