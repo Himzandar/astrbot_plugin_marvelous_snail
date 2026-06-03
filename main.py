@@ -10,6 +10,7 @@ import aiohttp
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 
+import astrbot.core.message.components as Comp
 from astrbot.api import AstrBotConfig, llm_tool, logger
 from astrbot.api.event import AstrMessageEvent, MessageChain, filter
 from astrbot.api.event.filter import (
@@ -215,18 +216,30 @@ class MarvelousSnailPlugin(Star):
         return "未知错误"
 
     @staticmethod
-    def _get_server_type_name(app_id: Any) -> str:
-        """根据 app_id 返回服务器类型名称。"""
-        if str(app_id) == "26":
+    def _get_server_type_name(game_id: Any) -> str:
+        """根据 game_id 返回服务器类型名称。"""
+        if str(game_id) == "26":
             return "光子服"
-        if str(app_id) == "39":
+        if str(game_id) == "39":
             return "官服"
         return "未知服"
 
     @staticmethod
+    def _get_bound_game_id(user_data: dict[str, Any]) -> str:
+        """读取绑定数据中的 game_id，兼容旧数据 app_id。"""
+        return str(user_data.get("game_id", user_data.get("app_id", "39")))
+
+    @staticmethod
+    def _set_bound_game_id(user_data: dict[str, Any], game_id: Any) -> None:
+        """写入绑定数据的 game_id，并回写旧键 app_id 以兼容历史数据。"""
+        game_id_text = str(game_id)
+        user_data["game_id"] = game_id_text
+        user_data["app_id"] = game_id_text
+
+    @staticmethod
     def _get_bound_app_id(user_data: dict[str, Any]) -> str:
-        """读取绑定数据中的 app_id，兼容旧数据默认回退到官服。"""
-        return str(user_data.get("app_id", "39"))
+        """兼容旧方法名，内部统一回退到 game_id 读取。"""
+        return MarvelousSnailPlugin._get_bound_game_id(user_data)
 
     @staticmethod
     def _format_role_info(user_data: dict[str, Any]) -> str:
@@ -239,7 +252,7 @@ class MarvelousSnailPlugin(Star):
         server_name = user_data.get("server_name", "未知区服")
         role_name = user_data.get("role_name", "未知角色")
         server_type = MarvelousSnailPlugin._get_server_type_name(
-            user_data.get("app_id")
+            MarvelousSnailPlugin._get_bound_game_id(user_data)
         )
         return f"[{server_type}] {server_name}-{role_name}:{score}"
 
@@ -331,6 +344,82 @@ class MarvelousSnailPlugin(Star):
     def _is_exit_command(text: str) -> bool:
         """判断用户是否主动退出当前交互流程。"""
         return text.strip() in {"退出", "取消", "q", "Q"}
+
+    async def _download_bytes_from_url(self, url: str) -> bytes | None:
+        """下载文件字节流，兼容回调文件服务。"""
+        normalized_url = url.replace("https://", "http://")
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(normalized_url) as response:
+                    if response.status != 200:
+                        logger.error(
+                            "下载文件失败，状态码: %s, url: %s",
+                            response.status,
+                            normalized_url,
+                        )
+                        return None
+                    return await response.read()
+        except Exception as exc:
+            logger.error(f"下载文件失败: {exc}")
+            return None
+
+    async def _load_quoted_json_payload(
+        self, event: AstrMessageEvent
+    ) -> tuple[dict[str, Any] | None, str | None]:
+        """读取当前消息引用中的 JSON 文件并解析。"""
+        chain = getattr(event.message_obj, "message", None)
+        reply_chain = (
+            chain[0].chain if chain and isinstance(chain[0], Comp.Reply) else None
+        )
+        file_comp = None
+        if isinstance(reply_chain, list):
+            file_comp = next(
+                (
+                    item
+                    for item in reply_chain
+                    if isinstance(item, Comp.File) and (item.url or item.file_)
+                ),
+                None,
+            )
+
+        if file_comp is None:
+            return None, "请引用一个批量绑定 JSON 文件"
+
+        file_name = str(file_comp.name or "")
+        if file_name and not file_name.lower().endswith(".json"):
+            return None, "仅支持 .json 文件"
+
+        try:
+            file_source = await file_comp.get_file(allow_return_url=True)
+        except Exception as exc:
+            logger.error(f"读取引用文件失败: {exc}")
+            return None, "读取引用文件失败"
+
+        if not file_source:
+            return None, "无法获取引用文件地址"
+
+        raw_bytes: bytes | None = None
+        if file_source.startswith(("http://", "https://")):
+            raw_bytes = await self._download_bytes_from_url(file_source)
+        else:
+            try:
+                raw_bytes = Path(file_source).read_bytes()
+            except Exception as exc:
+                logger.error(f"读取本地引用文件失败: {exc}")
+
+        if not raw_bytes:
+            return None, "下载或读取引用文件失败"
+
+        try:
+            payload = json.loads(raw_bytes.decode("utf-8-sig"))
+        except Exception as exc:
+            logger.error(f"解析批量绑定 JSON 失败: {exc}")
+            return None, "JSON 解析失败，请检查文件格式"
+
+        if not isinstance(payload, dict):
+            return None, "JSON 根节点必须是对象"
+
+        return payload, None
 
     def _split_markdown_chunks(self, content: str, max_lines: int = 50) -> list[str]:
         """按行数切分 Markdown，避免单张图片过长。"""
@@ -612,9 +701,7 @@ class MarvelousSnailPlugin(Star):
     ) -> None:
         user["sign_status"] = self._build_sign_status(state, message)
 
-    def _summarize_activity_gift_results(
-        self, gift_results: Any
-    ) -> dict[str, Any]:
+    def _summarize_activity_gift_results(self, gift_results: Any) -> dict[str, Any]:
         """汇总活动礼包领取结果。"""
         if not isinstance(gift_results, list):
             return {
@@ -1465,7 +1552,9 @@ class MarvelousSnailPlugin(Star):
                         else f"❌ 作者 {selected_author} 没有文章数据"
                     )
                     await event.send(
-                        event.plain_result(f"{message}\n请重新选择作者，或回复 退出 结束流程")
+                        event.plain_result(
+                            f"{message}\n请重新选择作者，或回复 退出 结束流程"
+                        )
                     )
                     await self._send_markdown_card(
                         event,
@@ -1768,7 +1857,7 @@ class MarvelousSnailPlugin(Star):
                     return
                 selected_user = users_data[index - 1]
                 selected_info = self._format_role_info(selected_user)
-                selected_app_id = str(selected_user.get("app_id", "39"))
+                selected_game_id = self._get_bound_game_id(selected_user)
                 logger.info(f"开始绑定角色: {selected_info}")
                 try:
                     payload = convert_to_query_bytes(selected_user, account)
@@ -1783,10 +1872,10 @@ class MarvelousSnailPlugin(Star):
                 result = await binds_account(self.headers, payload)
                 if result.get("code") == 200:
                     # 首次绑定执行一次签到
-                    sign_result = await sign_request(self.headers, selected_app_id)
+                    sign_result = await sign_request(self.headers, selected_game_id)
                     sign_ok = self._is_sign_success(sign_result)
                     gift_summary = await self._claim_activity_gifts_for_role(
-                        selected_app_id,
+                        selected_game_id,
                         str(selected_user["role_id"]),
                     )
                     gift_prefix = "✅" if gift_summary["success_count"] > 0 else "ℹ️"
@@ -1831,37 +1920,35 @@ class MarvelousSnailPlugin(Star):
                             logger.error(f"读取用户数据失败: {e}")
                     if isinstance(user_data, dict) and user_data.get("num", 0) > 0:
                         users = user_data.get("users", [])
-                        users.append(
-                            {
-                                "account": encrypted_account,
-                                "role_id": encrypted_role_id,
-                                "app_id": selected_app_id,
-                                "info": selected_info,
-                                "sign_status": self._build_sign_status(
-                                    "success" if sign_ok else "failed",
-                                    sign_result.get("message", "首次绑定后签到成功"),
-                                ),
-                            }
-                        )
+                        user_record = {
+                            "account": encrypted_account,
+                            "role_id": encrypted_role_id,
+                            "info": selected_info,
+                            "sign_status": self._build_sign_status(
+                                "success" if sign_ok else "failed",
+                                sign_result.get("message", "首次绑定后签到成功"),
+                            ),
+                        }
+                        self._set_bound_game_id(user_record, selected_game_id)
+                        users.append(user_record)
                         user_data["users"] = users
                         user_data["num"] = len(users)
                     else:
+                        initial_user_record = {
+                            "account": encrypted_account,
+                            "role_id": encrypted_role_id,
+                            "info": selected_info,
+                            "sign_status": self._build_sign_status(
+                                "success" if sign_ok else "failed",
+                                sign_result.get(
+                                    "message", "首次绑定后签到成功"
+                                ),
+                            ),
+                        }
+                        self._set_bound_game_id(initial_user_record, selected_game_id)
                         user_data = {
                             "num": 1,
-                            "users": [
-                                {
-                                    "account": encrypted_account,
-                                    "role_id": encrypted_role_id,
-                                    "app_id": selected_app_id,
-                                    "info": selected_info,
-                                    "sign_status": self._build_sign_status(
-                                        "success" if sign_ok else "failed",
-                                        sign_result.get(
-                                            "message", "首次绑定后签到成功"
-                                        ),
-                                    ),
-                                }
-                            ],
+                            "users": [initial_user_record],
                         }
                     with user_file.open("w", encoding="utf-8") as f:
                         json.dump(user_data, f, ensure_ascii=False, indent=4)
@@ -1880,6 +1967,196 @@ class MarvelousSnailPlugin(Star):
             await event.send(event.plain_result("❌ 选择超时，终止运行"))
         except Exception as e:
             logger.error("选择发生错误" + str(e))
+        event.stop_event()
+
+    @zqwn.command("批量绑定")
+    async def batch_bind_accounts(self, event: AstrMessageEvent):
+        """批量绑定账号，读取引用 JSON 文件后逐项执行绑定。"""
+        if not self.headers:
+            await event.send(
+                event.plain_result("❌ 未配置签到请求头，暂时无法批量绑定")
+            )
+            return
+
+        payload, error_msg = await self._load_quoted_json_payload(event)
+        if error_msg:
+            await event.send(event.plain_result(f"❌ {error_msg}"))
+            return
+        if payload is None:
+            await event.send(event.plain_result("❌ 批量绑定文件为空或格式不正确"))
+            return
+
+        server_to_game_id = {
+            "官服": "39",
+            "光子服": "26",
+            "39": "39",
+            "26": "26",
+        }
+
+        sender_id = event.get_sender_id().replace("/", "_")
+        user_data = self._load_user_data(sender_id) or {"num": 0, "users": []}
+        users = user_data.get("users", []) if isinstance(user_data, dict) else []
+        if not isinstance(users, list):
+            users = []
+
+        total_uid_count = 0
+        success_count = 0
+        failed_count = 0
+        success_lines: list[str] = []
+        failed_lines: list[str] = []
+        yield event.plain_result("⏳ 正在执行批量绑定,请稍候...")
+        for server_name, entries in payload.items():
+            if not isinstance(entries, list):
+                failed_count += 1
+                failed_lines.append(f"- [{server_name}] 数据格式错误，必须是数组")
+                continue
+
+            expected_game_id = server_to_game_id.get(str(server_name))
+            for entry_index, entry in enumerate(entries, start=1):
+                if not isinstance(entry, dict):
+                    failed_count += 1
+                    failed_lines.append(
+                        f"- [{server_name}] 第{entry_index}条 条目格式错误，必须是对象"
+                    )
+                    continue
+
+                phone = str(entry.get("phone", "")).strip()
+                uid_values = entry.get("uid", [])
+                if isinstance(uid_values, str):
+                    uid_list = [uid_values.strip()] if uid_values.strip() else []
+                elif isinstance(uid_values, list):
+                    uid_list = [
+                        str(uid).strip() for uid in uid_values if str(uid).strip()
+                    ]
+                else:
+                    uid_list = []
+
+                total_uid_count += len(uid_list)
+                if not phone or not uid_list:
+                    failed_count += 1
+                    failed_lines.append(
+                        f"- [{server_name}] 第{entry_index}条 手机号或 uid 为空，已跳过"
+                    )
+                    continue
+
+                roles = await get_server(phone)
+                if not roles:
+                    failed_count += len(uid_list)
+                    failed_lines.extend(
+                        [
+                            f"- [{server_name}] 第{entry_index}条 第{uid_index}个角色 获取角色失败"
+                            for uid_index, _ in enumerate(uid_list, start=1)
+                        ]
+                    )
+                    continue
+
+                role_map: dict[str, dict[str, Any]] = {}
+                for role in roles:
+                    if not isinstance(role, dict):
+                        continue
+                    role_id = str(role.get("role_id", "")).strip()
+                    if not role_id:
+                        continue
+                    current_role_game_id = self._get_bound_game_id(role)
+                    if expected_game_id and current_role_game_id != expected_game_id:
+                        continue
+                    role_map[role_id] = role
+
+                for uid_index, uid in enumerate(uid_list, start=1):
+                    role_marker = (
+                        f"[{server_name}] 第{entry_index}条 第{uid_index}个角色"
+                    )
+                    selected_user = role_map.get(uid)
+                    if not selected_user:
+                        failed_count += 1
+                        failed_lines.append(
+                            f"- {role_marker} 未匹配到对应角色"
+                        )
+                        continue
+
+                    selected_info = self._format_role_info(selected_user)
+                    selected_game_id = self._get_bound_game_id(selected_user)
+                    if not selected_game_id:
+                        selected_game_id = expected_game_id or "39"
+                    try:
+                        request_payload = convert_to_query_bytes(selected_user, phone)
+                    except Exception as exc:
+                        failed_count += 1
+                        failed_lines.append(
+                            f"- {role_marker} 绑定数据编码失败: {exc}"
+                        )
+                        continue
+
+                    result = await binds_account(self.headers, request_payload)
+                    if result.get("code") != 200:
+                        failed_count += 1
+                        failed_lines.append(
+                            f"- ❌ 绑定失败: {selected_info} ({result.get('message', '未知错误')})"
+                        )
+                        continue
+
+                    sign_result = await sign_request(self.headers, selected_game_id)
+                    sign_ok = self._is_sign_success(sign_result)
+                    gift_summary = await self._claim_activity_gifts_for_role(
+                        selected_game_id,
+                        str(selected_user.get("role_id", uid)),
+                    )
+
+                    user_record = {
+                        "account": encrypt_data(phone),
+                        "role_id": encrypt_data(str(selected_user.get("role_id", uid))),
+                        "info": selected_info,
+                        "sign_status": self._build_sign_status(
+                            "success" if sign_ok else "failed",
+                            sign_result.get("message", "首次绑定后签到成功"),
+                        ),
+                    }
+                    self._set_bound_game_id(user_record, selected_game_id)
+                    users.append(user_record)
+
+                    success_count += 1
+                    gift_prefix = "✅" if gift_summary["success_count"] > 0 else "ℹ️"
+                    success_lines.append(
+                        "\n".join(
+                            [
+                                f" {selected_info}\n✅ 绑定成功",
+                                (
+                                    f"{'✅' if sign_ok else '❌'} 首次绑定执行签到: "
+                                    f"{sign_result.get('message', '未知结果')}"
+                                ),
+                                (
+                                    f"{gift_prefix} 活动礼包结果: "
+                                    + "；".join(gift_summary["messages"])
+                                ),
+                            ]
+                        )
+                    )
+                    # 休眠3-15秒，防止请求过快被封IP，间隔随机3-15秒
+                    random_factor = random.uniform(3, 15)
+                    delay = max(
+                        3, random_factor
+                    )  # 确保间隔至少为3秒
+                    await asyncio.sleep(delay)
+        if users:
+            user_data = {"num": len(users), "users": users}
+            self._save_user_data(sender_id, user_data)
+
+        summary_lines = [
+            "【批量绑定汇总】",
+            f"总UID数: {total_uid_count}",
+            f"成功: {success_count}",
+            f"失败: {failed_count}",
+            "",
+        ]
+        if success_lines:
+            summary_lines.append("成功详情:")
+            summary_lines.extend(success_lines)
+            summary_lines.append("")
+        if failed_lines:
+            summary_lines.append("失败详情:")
+            summary_lines.extend(failed_lines)
+
+        await event.send(event.plain_result("\n".join(summary_lines).strip()))
         event.stop_event()
 
     @command("查询绑定")
@@ -2048,6 +2325,7 @@ class MarvelousSnailPlugin(Star):
         help_text = (
             "【最强蜗牛插件帮助】\n"
             "绑定账号 <手机号> (例:/绑定账号 1234567890)\n"
+            "最强蜗牛 批量绑定 (需引用JSON模板文件)\n"
             "查询绑定\n"
             "注销绑定\n"
             "定时签到推送 开启|关闭\n"
@@ -2155,8 +2433,8 @@ class MarvelousSnailPlugin(Star):
                                 failed_count += 1
                                 failed_account_count += 1
                                 continue
-                            bound_app_id = self._get_bound_app_id(user)
-                            unique_users[(role_id, bound_app_id)] = user
+                            bound_game_id = self._get_bound_game_id(user)
+                            unique_users[(role_id, bound_game_id)] = user
                         users = list(unique_users.values())
                         account_count = len(users) + invalid_account_count
                         total_account_count += account_count
@@ -2165,7 +2443,7 @@ class MarvelousSnailPlugin(Star):
                         for user in users:
                             info = user.get("info", "未知角色")
                             detail_parts = [f"角色: {info}"]
-                            bound_app_id = self._get_bound_app_id(user)
+                            bound_game_id = self._get_bound_game_id(user)
                             self._set_auto_sign_progress(
                                 running=True,
                                 completed_users=index - 1,
@@ -2211,15 +2489,15 @@ class MarvelousSnailPlugin(Star):
                                 continue
                             matched = False
                             for user_server_data in users_server_data:
-                                current_app_id = self._get_bound_app_id(
+                                current_game_id = self._get_bound_game_id(
                                     user_server_data
                                 )
                                 if (
                                     user_server_data.get("role_id") == role_id
-                                    and current_app_id == bound_app_id
+                                    and current_game_id == bound_game_id
                                 ):
                                     matched = True
-                                    user["app_id"] = current_app_id
+                                    self._set_bound_game_id(user, current_game_id)
                                     info = self._format_role_info(user_server_data)
                                     user["info"] = info
                                     detail_parts = [f"角色: {info}"]
@@ -2244,7 +2522,7 @@ class MarvelousSnailPlugin(Star):
                                     result = await binds_account(self.headers, payload)
                                     if result.get("code") == 200:
                                         sign_result = await sign_request(
-                                            self.headers, current_app_id
+                                            self.headers, current_game_id
                                         )
                                         sign_message = str(
                                             sign_result.get("message", "未知结果")
@@ -2451,15 +2729,15 @@ class MarvelousSnailPlugin(Star):
                     failed_count += 1
                     failed_account_count += 1
                     continue
-                bound_app_id = self._get_bound_app_id(user)
-                unique_users[(role_id, bound_app_id)] = user
+                bound_game_id = self._get_bound_game_id(user)
+                unique_users[(role_id, bound_game_id)] = user
 
             role_entries = list(unique_users.items())
             account_count = len(role_entries) + invalid_account_count
             total_account_count += account_count
             self.randomizer.shuffle(role_entries)
 
-            for (role_id, bound_app_id), user in role_entries:
+            for (role_id, bound_game_id), user in role_entries:
                 info = user.get("info", "未知角色")
                 detail_parts = [f"角色: {info}"]
                 try:
@@ -2482,15 +2760,15 @@ class MarvelousSnailPlugin(Star):
                     continue
 
                 matched_user_data = None
-                current_app_id = bound_app_id
+                current_game_id = bound_game_id
                 for user_server_data in users_server_data:
-                    candidate_app_id = self._get_bound_app_id(user_server_data)
+                    candidate_game_id = self._get_bound_game_id(user_server_data)
                     if (
                         user_server_data.get("role_id") == role_id
-                        and candidate_app_id == bound_app_id
+                        and candidate_game_id == bound_game_id
                     ):
                         matched_user_data = user_server_data
-                        current_app_id = candidate_app_id
+                        current_game_id = candidate_game_id
                         break
 
                 if matched_user_data is None:
@@ -2501,7 +2779,7 @@ class MarvelousSnailPlugin(Star):
                     role_summary_lines.append(f"  - {'；'.join(detail_parts)}")
                     continue
 
-                user["app_id"] = current_app_id
+                self._set_bound_game_id(user, current_game_id)
                 info = self._format_role_info(matched_user_data)
                 user["info"] = info
                 detail_parts = [f"角色: {info}"]
@@ -2519,9 +2797,7 @@ class MarvelousSnailPlugin(Star):
                 bind_result = await binds_account(self.headers, payload)
                 if bind_result.get("code") != 200:
                     error_message = bind_result.get("message", "绑定失败")
-                    logger.warning(
-                        f"活动礼包任务绑定失败: {info} -> {error_message}"
-                    )
+                    logger.warning(f"活动礼包任务绑定失败: {info} -> {error_message}")
                     failed_count += 1
                     failed_account_count += 1
                     detail_parts.append(f"结果: 绑定失败({error_message})")
@@ -2529,7 +2805,7 @@ class MarvelousSnailPlugin(Star):
                     continue
 
                 gift_summary = await self._claim_activity_gifts_for_role(
-                    current_app_id,
+                    current_game_id,
                     role_id,
                 )
                 if gift_summary["success_count"] > 0:
