@@ -9,7 +9,14 @@ REQUEST_TIMEOUT = aiohttp.ClientTimeout(total=30)
 
 
 async def _request_json(method: str, url: str, **kwargs):
-    """发送请求并统一处理网络异常、超时和非 200 响应。"""
+    """发送请求并统一处理网络异常、超时和非 200 响应。
+    Args:
+        method: HTTP 方法，如 "get" 或 "post"。
+        url: 请求的 URL。
+        **kwargs: 其他请求参数，如 headers、data 等。
+    Returns:
+        dict: 如果请求成功返回 JSON 数据，否则返回 None。
+    """
     try:
         async with aiohttp.ClientSession(timeout=REQUEST_TIMEOUT) as session:
             request = getattr(session, method)
@@ -206,7 +213,14 @@ async def activity_gift_request(headers, activity_gift_datas, game_id: str = "39
 
 
 async def activity_gift_claim(headers, game_id: str, role_id: str):
-    """查询并领取当前角色的活动礼包。"""
+    """查询并领取当前角色的活动礼包。
+    Args:
+        headers: 请求头
+        game_id: 查询所属服务器的 game_id
+        role_id: 角色 ID
+    Returns:
+        包含领取结果的列表
+    """
     inquiry_data = await activity_gift_inquiry(headers, game_id, role_id)
     if not isinstance(inquiry_data, dict):
         return [{"code": -1, "message": "查询活动礼包信息请求失败"}]
@@ -234,5 +248,3 @@ async def activity_gift_claim(headers, game_id: str, role_id: str):
     if isinstance(response_data, dict):
         return [response_data]
     return [{"code": -1, "message": "领取活动礼包请求失败"}]
-
-

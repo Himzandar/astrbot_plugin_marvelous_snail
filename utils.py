@@ -29,6 +29,14 @@ def cron_to_human(cron: str) -> str:
     minute, hour, day, month, week = parts
 
     def parse_field(val, unit, names=None):
+        """解析单个字段，支持 *, */n, 1, 1,2,3 和 1-5 等格式
+        Args:
+            val: 字段值
+            unit: 单位
+            names: 可选的名称映射字典
+        Returns:
+            解析后的字符串
+        """
         if val == "*":
             return f"每{unit}"
         if val.startswith("*/"):
@@ -116,7 +124,10 @@ SECRET_KEY = b"a7s9d2k4f6g5h3j1q8w2e4r6t7y0u5i"  # 自己改一个
 
 
 def get_fernet():
-    """生成 Fernet 对象用于加密和解密"""
+    """生成 Fernet 对象用于加密和解密
+    Returns:
+        Fernet 对象
+    """
     kdf = PBKDF2HMAC(
         algorithm=hashes.SHA256(),
         length=32,
@@ -128,22 +139,33 @@ def get_fernet():
 
 
 def encrypt_data(text: str) -> str:
-    """加密数据，返回加密后的字符串"""
+    """加密数据，返回加密后的字符串
+    Args:
+        text: 要加密的文本
+    Returns:
+        加密后的字符串
+    """
     return get_fernet().encrypt(text.encode()).decode()
 
 
 def decrypt_data(token: str) -> str:
-    """解密数据，返回解密后的字符串"""
+    """解密数据，返回解密后的字符串
+    Args:
+        token: 要解密的字符串
+    Returns:
+        解密后的字符串
+    """
     return get_fernet().decrypt(token.encode()).decode()
 
 
 def convert_to_query_bytes(data, account, page_id=1):
-    """
-    将输入字典转换为类似示例的 URL 查询字节串
-    :param data: 原始数据字典
-    :param account: 外部传入的手机号（示例中固定为 "1234567890"）
-    :param page_id: 固定页号，默认为 1
-    :return: bytes 类型的查询字符串
+    """将输入字典转换为类似示例的 URL 查询字节串
+    Args:
+        data: 原始数据字典
+        account: 外部传入的手机号（示例中固定为 "1234567890"）
+        page_id: 固定页号，默认为 1
+    Returns:
+        bytes 类型的查询字符串
     """
     if not isinstance(data, dict):
         raise ValueError("角色数据格式无效")
@@ -188,5 +210,8 @@ def convert_to_query_bytes(data, account, page_id=1):
 
 
 def get_week():
-    """获取当前星期几，返回 0-6 的整数，0 代表周一，6 代表周日"""
+    """获取当前星期几，返回 0-6 的整数，0 代表周一，6 代表周日
+    Returns:
+        int: 当前星期几，0-6 的整数
+    """
     return datetime.now().weekday()
