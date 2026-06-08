@@ -108,6 +108,8 @@ class Parse:
             plugin_data_path: 插件数据路径
             author: 作者名称
             parse_str: 要解析的字符串
+        Returns:
+            包含解析结果的字典，包含提示消息和数据列表
         """
         ret = {"msg": "", "data": []}
         articles = await self.get_author_all_title_and_link(plugin_data_path, author)
@@ -132,6 +134,8 @@ class Parse:
         Args:
             strategies (dict): 攻略字典，键为标题，值为链接
             page_size (int): 每页显示的攻略数量
+        Returns:
+            包含分页结果的列表，每个元素包含页面消息和对应的数据
         """
         # 计算总页数
         total_pages = (len(strategies) + page_size - 1) // page_size

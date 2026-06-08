@@ -1,6 +1,6 @@
 name: astrbot_plugin_marvelous_snail
 display_name: 最强蜗牛🐌
 desc: 攻略缓存全量修正、密令工具发送、账号绑定签到与图片汇总推送
-version: v1.4.2
+version: v1.5.0
 author: Himzandar
 repo: https://github.com/Himzandar/astrbot_plugin_marvelous_snail
