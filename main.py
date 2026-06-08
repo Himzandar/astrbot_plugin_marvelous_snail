@@ -2,9 +2,9 @@ from astrbot.api import llm_tool
 from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.event.filter import command, command_group
 
-from .account_feature import AccountFeatureMixin
-from .plugin_base import MarvelousSnailPluginBase
-from .strategy_feature import StrategyFeatureMixin
+from .core.account_feature import AccountFeatureMixin
+from .core.plugin_base import MarvelousSnailPluginBase
+from .core.strategy_feature import StrategyFeatureMixin
 
 
 class MarvelousSnailPlugin(
@@ -92,7 +92,7 @@ class MarvelousSnailPlugin(
         """攻略推送实现函数，支持管理员开启或关闭攻略推送。
         Args:
             event: 消息事件对象。
-            enabled: 是否启用攻略推送，取值为 "true" 或 "false"。
+            enabled: 是否启用攻略推送，取值为 "开启" 或 "关闭"。
         Returns:
             异步生成器，返回操作结果。
         """
@@ -121,16 +121,6 @@ class MarvelousSnailPlugin(
         """
         async for result in self.get_fugitives_impl(event, name):
             yield result
-
-    @llm_tool("send_code")
-    async def send_code(self, event: AstrMessageEvent) -> None:
-        """发送密令实现函数，支持用户查询最新的密令信息并发送给用户。
-        Args:
-            event: 消息事件对象。
-        Returns:
-            None
-        """
-        await self.send_code_impl(event)
 
     @command("绑定账号")
     async def get_headers(self, event: AstrMessageEvent, account: str):
@@ -178,7 +168,7 @@ class MarvelousSnailPlugin(
         """定时签到推送实现函数，支持用户开启或关闭定时签到推送。
         Args:
             event: 消息事件对象。
-            enabled: 是否启用定时签到推送，取值为 "true" 或 "false"。
+            enabled: 是否启用定时签到推送，取值为 "开启" 或 "关闭"。
         Returns:
             异步生成器，返回操作结果。
         """
@@ -227,3 +217,15 @@ class MarvelousSnailPlugin(
         """
         async for result in self.account_statistics_impl(event):
             yield result
+
+    #=============工具函数=============
+    @llm_tool("send_code")
+    async def send_code(self, event: AstrMessageEvent) -> None:
+        """发送当前有效密令列表。仅在用户明确要求查看密令列表时才调用。
+        调用前请严格判断：
+        1. 用户是否明确要求查看当前有效密令、兑换码列表、全部密令？
+        2. 如果用户只是闲聊、询问攻略、绑定账号、签到、特工逃犯等其他功能，请不要调用此工具。
+        3. 如果用户只是提到“密令”但意图不明确，请先询问用户是否需要查看当前有效密令列表。
+        4. 如果用户是在询问某一条密令的来源、使用方式、失效原因，或让你解释密令内容，请不要调用此工具，应直接回答。
+        """
+        await self.send_code_impl(event)
