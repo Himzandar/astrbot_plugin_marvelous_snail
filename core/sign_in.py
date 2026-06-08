@@ -72,7 +72,7 @@ async def get_server(account: str):
 
             for character in android_data:
                 if isinstance(character, dict):
-                    character["app_id"] = server_key
+                    character["game_id"] = server_key
                     merged_android_data.append(character)
 
         if not merged_android_data:

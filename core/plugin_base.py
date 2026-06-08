@@ -22,11 +22,8 @@ from astrbot.core.utils.astrbot_path import (
 )
 
 from .parse import Parse
-from .sign_in import activity_gift_claim, sign_request
-from .utils import (
-    cron_to_human,
-    get_week,
-)
+from .sign_in import activity_gift_claim
+from .utils import cron_to_human, get_week
 
 PLUGIN_NAME = "astrbot_plugin_marvelous_snail"
 
@@ -75,7 +72,7 @@ class MarvelousSnailPluginBase(Star):
         """
         raise NotImplementedError()
 
-    async def auto_activity_gift_sign_in(self):
+    async def keep_sign_in(self):
         """由account_feature提供实现。
         Returns:
             None
@@ -114,12 +111,7 @@ class MarvelousSnailPluginBase(Star):
                 "auto_sign_in_job", "10 8 * * *", self.auto_sign_in
             )
             await self._start_auto_job(
-                "auto_activity_gift_job",
-                "0 9 * * 5",
-                self.auto_activity_gift_sign_in,
-            )
-            await self._start_auto_job(
-                "keep_sign_in_job", "*/30 * * * *", sign_request, [self.headers]
+                "keep_sign_in_job", "*/30 * * * *", self.keep_sign_in
             )
         else:
             logger.warning("未配置 headers，已跳过自动签到相关定时任务")
@@ -264,17 +256,17 @@ class MarvelousSnailPluginBase(Star):
 
     @staticmethod
     def _get_bound_game_id(user_data: dict[str, Any]) -> str:
-        """读取绑定数据中的 game_id，兼容旧数据 app_id。
+        """读取绑定数据中的 game_id。
         Args:
             user_data: 用户绑定数据字典。
         Returns:
             str: 绑定的 game_id，如果不存在则返回默认值 "39"。
         """
-        return str(user_data.get("game_id", user_data.get("app_id", "39")))
+        return str(user_data.get("game_id", "39"))
 
     @staticmethod
     def _set_bound_game_id(user_data: dict[str, Any], game_id: Any) -> None:
-        """写入绑定数据的 game_id，并回写旧键 app_id 以兼容历史数据。
+        """写入绑定数据的 game_id。
         Args:
             user_data: 用户绑定数据字典。
             game_id: 要绑定的 game_id。
@@ -283,17 +275,6 @@ class MarvelousSnailPluginBase(Star):
         """
         game_id_text = str(game_id)
         user_data["game_id"] = game_id_text
-        user_data["app_id"] = game_id_text
-
-    @staticmethod
-    def _get_bound_app_id(user_data: dict[str, Any]) -> str:
-        """兼容旧方法名，内部统一回退到 game_id 读取。
-        Args:
-            user_data: 用户绑定数据字典。
-        Returns:
-            str: 绑定的 app_id，如果不存在则返回默认值 "39"。
-        """
-        return MarvelousSnailPluginBase._get_bound_game_id(user_data)
 
     @staticmethod
     def _format_role_info(user_data: dict[str, Any]) -> str:

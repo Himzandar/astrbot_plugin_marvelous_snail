@@ -3,6 +3,7 @@ import json
 import random
 import time
 from collections.abc import Callable
+from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -614,6 +615,9 @@ class AccountFeatureMixin(AccountFeatureBase):
         Returns:
             None
         """
+        # 强制执行自动签到操作，通常用于测试或管理员手动触发签到流程。
+        await self.auto_sign_in()
+
         event.stop_event()
 
     async def show_help_impl(self, event: AstrMessageEvent):
@@ -653,6 +657,9 @@ class AccountFeatureMixin(AccountFeatureBase):
         total_account_count = 0
         success_account_count = 0
         failed_account_count = 0
+        gift_success_account_count = 0
+        gift_failed_account_count = 0
+        gift_skipped_account_count = 0
         success_user_count = 0
         failed_user_count = 0
         self._set_auto_sign_progress(
@@ -801,9 +808,6 @@ class AccountFeatureMixin(AccountFeatureBase):
                                         )
                                         success_count += 1
                                         success_account_count += 1
-                                        await asyncio.sleep(
-                                            max(3, random.uniform(3, 15))
-                                        )
                                     else:
                                         self._set_user_sign_status(
                                             user,
@@ -814,6 +818,48 @@ class AccountFeatureMixin(AccountFeatureBase):
                                         failed_account_count += 1
                                         detail_parts.append(
                                             f"结果: 签到失败({sign_message or '签到失败'})"
+                                        )
+
+                                    # 周五同步领取活动礼包
+                                    if datetime.now().weekday() == 4:
+                                        gift_summary = (
+                                            await self._claim_activity_gifts_for_role(
+                                                current_game_id,
+                                                role_id,
+                                            )
+                                        )
+                                        if gift_summary["success_count"] > 0:
+                                            gift_success_account_count += 1
+                                        elif gift_summary["failed_count"] > 0:
+                                            gift_failed_account_count += 1
+                                        else:
+                                            gift_skipped_account_count += 1
+
+                                        claimed_gifts = gift_summary.get(
+                                            "claimed_gifts", []
+                                        )
+                                        failed_gifts = gift_summary.get(
+                                            "failed_gifts", []
+                                        )
+                                        if claimed_gifts:
+                                            detail_parts.append(
+                                                f"已领取礼包: {'、'.join(str(name) for name in claimed_gifts)}"
+                                            )
+                                        if failed_gifts:
+                                            detail_parts.append(
+                                                f"失败礼包: {'、'.join(str(name) for name in failed_gifts)}"
+                                            )
+                                        if not claimed_gifts and not failed_gifts:
+                                            detail_parts.append(
+                                                "已领取礼包: 无可领取礼包"
+                                            )
+                                        if gift_summary["has_claim_attempt"]:
+                                            await asyncio.sleep(
+                                                max(3, random.uniform(3, 15))
+                                            )
+                                    elif self._is_sign_success(sign_result):
+                                        await asyncio.sleep(
+                                            max(3, random.uniform(3, 15))
                                         )
                                 else:
                                     error_message = result.get("message", "未知错误")
@@ -879,10 +925,26 @@ class AccountFeatureMixin(AccountFeatureBase):
                     f"- 账号总数: {total_account_count}",
                     f"- 签到成功账号数: {success_account_count}",
                     f"- 签到失败账号数: {failed_account_count}",
-                    f"- 签到耗时: {duration_seconds:.1f} 秒",
-                    "",
-                    "## 用户明细",
                 ]
+                if (
+                    gift_success_account_count
+                    or gift_failed_account_count
+                    or gift_skipped_account_count
+                ):
+                    summary_header.extend(
+                        [
+                            f"- 礼包领取成功: {gift_success_account_count}",
+                            f"- 礼包领取失败: {gift_failed_account_count}",
+                            f"- 无可领礼包: {gift_skipped_account_count}",
+                        ]
+                    )
+                summary_header.extend(
+                    [
+                        f"- 签到耗时: {duration_seconds:.1f} 秒",
+                        "",
+                        "## 用户明细",
+                    ]
+                )
                 summary_text = "\n".join(summary_header + summary_lines)
                 reward_image_path = self._get_today_reward_image_path()
                 for group_target in group_targets:
@@ -907,191 +969,89 @@ class AccountFeatureMixin(AccountFeatureBase):
                 last_finished_at=time.time(),
             )
 
-    async def auto_activity_gift_sign_in(self):
-        """执行自动领取活动礼包操作，处理每周活动礼包任务。
-        Args:
-            None
-        Returns:
-            None
+    async def keep_sign_in(self):
+        """Keep-sign-in 定时任务：遍历用户数据，绑定角色以保持会话活性。
+        随机打乱后逐个尝试，直到成功绑定一次为止，避免单次失败导致 headers 过期。
         """
-        prepared = self._prepare_scheduled_user_files("每周活动礼包任务")
-        if prepared is None:
+        user_dir = self._get_user_dir()
+        if not user_dir.exists():
+            logger.info("未找到用户绑定目录，跳过 keep_sign_in")
             return
-        group_targets, user_files = prepared
-        started_at = time.time()
-        summary_lines: list[str] = []
-        total_account_count = 0
-        success_account_count = 0
-        failed_account_count = 0
-        skipped_account_count = 0
-        success_user_count = 0
-        failed_user_count = 0
-        skipped_user_count = 0
 
+        user_files = list(user_dir.glob("*.json"))
+        if not user_files:
+            logger.info("用户绑定目录为空，跳过 keep_sign_in")
+            return
+
+        # 随机打乱所有用户文件，逐个尝试直到成功
+        self.randomizer.shuffle(user_files)
         for user_file in user_files:
             user_id = user_file.stem
-            success_count = 0
-            failed_count = 0
-            skipped_count = 0
-            account_count = 0
-            invalid_account_count = 0
-            role_summary_lines: list[str] = []
 
-            users = self._load_task_users(user_file, user_id, "活动礼包任务")
-            if users is None:
-                failed_user_count += 1
-                summary_lines.append(
-                    f"- 用户ID: {user_id}，账号总数: 0，成功: 0，失败: 0"
-                )
+            try:
+                with user_file.open("r", encoding="utf-8") as f:
+                    user_data = json.load(f)
+            except Exception as e:
+                logger.warning(f"keep_sign_in 读取用户 {user_id} 数据失败: {e}")
                 continue
 
-            users, invalid_account_count = self._deduplicate_bound_users(user_id, users)
-            failed_count += invalid_account_count
-            failed_account_count += invalid_account_count
-            role_entries = [(self._get_bound_game_id(user), user) for user in users]
-            account_count = len(role_entries) + invalid_account_count
-            total_account_count += account_count
-            self.randomizer.shuffle(role_entries)
+            users = user_data.get("users", []) if isinstance(user_data, dict) else []
+            if not isinstance(users, list) or not users:
+                continue
 
-            for bound_game_id, user in role_entries:
-                info = user.get("info", "未知角色")
-                detail_parts = [f"角色: {info}"]
+            # 去重后随机打乱
+            users, _ = self._deduplicate_bound_users(user_id, users)
+            if not users:
+                continue
+            self.randomizer.shuffle(users)
+
+            for chosen_user in users:
+                info = chosen_user.get("info", "未知角色")
+                bound_game_id = self._get_bound_game_id(chosen_user)
+
                 try:
-                    account = decrypt_data(user["account"])
-                    role_id = decrypt_data(user["role_id"])
-                except Exception as exc:
-                    logger.error(f"解密用户 {user_id} 的账号数据失败: {exc}")
-                    failed_count += 1
-                    failed_account_count += 1
-                    detail_parts.append("结果: 账号数据解密失败")
-                    role_summary_lines.append(f"  - {'；'.join(detail_parts)}")
+                    account = decrypt_data(chosen_user["account"])
+                    role_id = decrypt_data(chosen_user["role_id"])
+                except Exception as e:
+                    logger.warning(f"keep_sign_in 解密用户 {user_id} 数据失败: {e}")
                     continue
 
                 users_server_data = await get_server(account)
-                if users_server_data is None or len(users_server_data) == 0:
-                    logger.error(f"活动礼包任务获取角色信息失败: {info or user_id}")
-                    failed_count += 1
-                    failed_account_count += 1
-                    detail_parts.append("结果: 获取角色信息失败")
-                    role_summary_lines.append(f"  - {'；'.join(detail_parts)}")
+                if not users_server_data:
+                    logger.warning(f"keep_sign_in 获取角色信息失败: {info}")
                     continue
 
-                matched_user_data = None
-                current_game_id = bound_game_id
+                # 匹配角色
+                matched = False
                 for user_server_data in users_server_data:
-                    candidate_game_id = self._get_bound_game_id(user_server_data)
+                    current_game_id = self._get_bound_game_id(user_server_data)
                     if (
                         user_server_data.get("role_id") == role_id
-                        and candidate_game_id == bound_game_id
+                        and current_game_id == bound_game_id
                     ):
-                        matched_user_data = user_server_data
-                        current_game_id = candidate_game_id
+                        matched = True
+                        matched_info = self._format_role_info(user_server_data)
+                        try:
+                            payload = convert_to_query_bytes(user_server_data, account)
+                        except Exception as e:
+                            logger.warning(f"keep_sign_in 编码绑定数据失败: {e}")
+                            break
+
+                        result = await binds_account(self.headers, payload)
+                        if result.get("code") == 200:
+                            logger.info(f"keep_sign_in 绑定成功: {matched_info}")
+                            return  # 成功即返回
+                        else:
+                            logger.warning(
+                                f"keep_sign_in 绑定失败: {matched_info} -> "
+                                f"{result.get('message', '未知错误')}"
+                            )
                         break
 
-                if matched_user_data is None:
-                    logger.warning(f"活动礼包任务未找到匹配角色: {info or user_id}")
-                    failed_count += 1
-                    failed_account_count += 1
-                    detail_parts.append("结果: 未找到最新角色信息")
-                    role_summary_lines.append(f"  - {'；'.join(detail_parts)}")
-                    continue
+                if not matched:
+                    logger.warning(f"keep_sign_in 未找到匹配角色: {info}")
 
-                self._set_bound_game_id(user, current_game_id)
-                info = self._format_role_info(matched_user_data)
-                user["info"] = info
-                detail_parts = [f"角色: {info}"]
-
-                try:
-                    payload = convert_to_query_bytes(matched_user_data, account)
-                except Exception as exc:
-                    logger.error(f"编码活动礼包绑定数据失败: {exc}")
-                    failed_count += 1
-                    failed_account_count += 1
-                    detail_parts.append("结果: 角色数据异常")
-                    role_summary_lines.append(f"  - {'；'.join(detail_parts)}")
-                    continue
-
-                bind_result = await binds_account(self.headers, payload)
-                if bind_result.get("code") != 200:
-                    error_message = bind_result.get("message", "绑定失败")
-                    logger.warning(f"活动礼包任务绑定失败: {info} -> {error_message}")
-                    failed_count += 1
-                    failed_account_count += 1
-                    detail_parts.append(f"结果: 绑定失败({error_message})")
-                    role_summary_lines.append(f"  - {'；'.join(detail_parts)}")
-                    continue
-
-                gift_summary = await self._claim_activity_gifts_for_role(
-                    current_game_id,
-                    role_id,
-                )
-                if gift_summary["success_count"] > 0:
-                    success_count += 1
-                    success_account_count += 1
-                elif gift_summary["failed_count"] > 0:
-                    failed_count += 1
-                    failed_account_count += 1
-                else:
-                    skipped_count += 1
-                    skipped_account_count += 1
-
-                message = "；".join(gift_summary["messages"])
-                claimed_gifts = gift_summary.get("claimed_gifts", [])
-                failed_gifts = gift_summary.get("failed_gifts", [])
-                if claimed_gifts:
-                    detail_parts.append(
-                        f"已领取礼包: {'、'.join(str(name) for name in claimed_gifts)}"
-                    )
-                if failed_gifts:
-                    detail_parts.append(
-                        f"失败礼包: {'、'.join(str(name) for name in failed_gifts)}"
-                    )
-                if not claimed_gifts and not failed_gifts:
-                    detail_parts.append("已领取礼包: 无可领取礼包")
-                role_summary_lines.append(f"  - {'；'.join(detail_parts)}")
-                logger.info(f"活动礼包处理完成: {user_id} {info} -> {message}")
-                if gift_summary["has_claim_attempt"]:
-                    await asyncio.sleep(max(3, random.uniform(3, 15)))
-
-            if success_count > 0:
-                success_user_count += 1
-            elif failed_count > 0:
-                failed_user_count += 1
-            else:
-                skipped_user_count += 1
-
-            summary_lines.append(
-                f"- 用户ID: {user_id}，账号总数: {account_count}，成功: {success_count}，失败: {failed_count}，跳过: {skipped_count}"
-            )
-            summary_lines.extend(role_summary_lines)
-
-        if group_targets and summary_lines:
-            duration_seconds = max(0.0, time.time() - started_at)
-            summary_header = [
-                f"- 领取成功用户数: {success_user_count}",
-                f"- 领取失败用户数: {failed_user_count}",
-                f"- 无可领礼包用户数: {skipped_user_count}",
-                f"- 账号总数: {total_account_count}",
-                f"- 领取成功账号数: {success_account_count}",
-                f"- 领取失败账号数: {failed_account_count}",
-                f"- 无可领礼包账号数: {skipped_account_count}",
-                f"- 执行耗时: {duration_seconds:.1f} 秒",
-                "",
-                "## 用户明细",
-            ]
-            summary_text = "\n".join(summary_header + summary_lines)
-            for group_target in group_targets:
-                try:
-                    await self._send_rendered_message(
-                        group_target,
-                        summary_text,
-                        msg="每周活动礼包数据",
-                    )
-                    logger.info(f"已发送每周活动礼包汇总到群 {group_target}")
-                except Exception as exc:
-                    logger.error(f"发送每周活动礼包汇总到群 {group_target} 失败: {exc}")
-        elif not group_targets:
-            logger.info("未配置群聊定时签到汇总推送目标，已跳过活动礼包汇总发送")
+        logger.warning("keep_sign_in 所有用户均尝试失败，headers 可能已过期")
 
     async def account_statistics_impl(self, event: AstrMessageEvent):
         """处理账号统计的请求，统计当前绑定数据中的用户数和账号数，并将统计结果返回给用户。
