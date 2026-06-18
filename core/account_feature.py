@@ -822,15 +822,57 @@ class AccountFeatureMixin(AccountFeatureBase):
 
                                     # 周五同步领取活动礼包
                                     if datetime.now().weekday() == 4:
-                                        gift_summary = (
-                                            await self._claim_activity_gifts_for_role(
-                                                current_game_id,
-                                                role_id,
+                                        try:
+                                            gift_summary = await asyncio.wait_for(
+                                                self._claim_activity_gifts_for_role(
+                                                    current_game_id,
+                                                    role_id,
+                                                ),
+                                                timeout=60,
                                             )
+                                        except asyncio.TimeoutError:
+                                            logger.error(
+                                                f"领取活动礼包超时: {info or user_id}"
+                                            )
+                                            gift_summary = {
+                                                "success_count": 0,
+                                                "failed_count": 1,
+                                                "claimed_gifts": [],
+                                                "failed_gifts": ["领取超时"],
+                                                "has_claim_attempt": False,
+                                            }
+                                        except Exception as exc:
+                                            logger.error(
+                                                f"领取活动礼包失败: {info or user_id}: {exc}"
+                                            )
+                                            gift_summary = {
+                                                "success_count": 0,
+                                                "failed_count": 1,
+                                                "claimed_gifts": [],
+                                                "failed_gifts": ["领取异常"],
+                                                "has_claim_attempt": False,
+                                            }
+                                        if not isinstance(gift_summary, dict):
+                                            logger.error(
+                                                f"领取活动礼包返回数据异常: {info or user_id}"
+                                            )
+                                            gift_summary = {
+                                                "success_count": 0,
+                                                "failed_count": 1,
+                                                "claimed_gifts": [],
+                                                "failed_gifts": ["返回数据异常"],
+                                                "has_claim_attempt": False,
+                                            }
+
+                                        gift_success_count = int(
+                                            gift_summary.get("success_count", 0) or 0
                                         )
-                                        if gift_summary["success_count"] > 0:
+                                        gift_failed_count = int(
+                                            gift_summary.get("failed_count", 0) or 0
+                                        )
+                                        if gift_success_count > 0:
                                             gift_success_account_count += 1
-                                        elif gift_summary["failed_count"] > 0:
+                                        elif gift_failed_count > 0:
                                             gift_failed_account_count += 1
                                         else:
                                             gift_skipped_account_count += 1
@@ -853,7 +895,7 @@ class AccountFeatureMixin(AccountFeatureBase):
                                             detail_parts.append(
                                                 "已领取礼包: 无可领取礼包"
                                             )
-                                        if gift_summary["has_claim_attempt"]:
+                                        if gift_summary.get("has_claim_attempt", False):
                                             await asyncio.sleep(
                                                 max(3, random.uniform(3, 15))
                                             )
