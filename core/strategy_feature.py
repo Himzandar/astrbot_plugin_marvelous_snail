@@ -25,6 +25,25 @@ else:
 class StrategyFeatureMixin(StrategyFeatureBase):
     """最强蜗牛攻略功能类，提供了与攻略相关的核心功能实现，包括获取最新文章、发送更新通知、搜索和选择攻略等。"""
 
+    STRATEGY_SYNC_WINDOW_SECONDS = 7 * 24 * 60 * 60
+
+    @staticmethod
+    def _get_strategy_article_time(article: dict[str, Any]) -> int | None:
+        """获取攻略文章的时间戳，优先使用 update_time 字段，如果没有则使用 create_time 字段。
+        Args:
+            article: 文章信息字典，包含 update_time 和 create_time 字段。
+        Returns:
+            int | None: 返回文章的时间戳，如果无法获取则返回 None。
+        """
+        article_time = article.get("update_time","") or article.get("create_time","")
+        try:
+            timestamp = int(article_time)
+        except (TypeError, ValueError):
+            return None
+        if timestamp > 10_000_000_000:
+            timestamp //= 1000
+        return timestamp
+
     @staticmethod
     def _friend_message_only_error(
         event: AstrMessageEvent,
@@ -230,11 +249,13 @@ class StrategyFeatureMixin(StrategyFeatureBase):
         fetched_articles: list[dict[str, Any]] = []
         begin = 0
         page_size = 20
+        cutoff_time = int(time.time()) - self.STRATEGY_SYNC_WINDOW_SECONDS
         headers = {"X-Auth-Key": self.config.get("exporter_auth_key")}
         api_url = self.config.get("exporter_api_url")
 
         async with aiohttp.ClientSession() as session:
             while True:
+                reached_cutoff = False
                 params = {"fakeid": fakeid, "begin": begin, "size": page_size}
                 try:
                     async with session.get(
@@ -268,8 +289,15 @@ class StrategyFeatureMixin(StrategyFeatureBase):
                         continue
                     if article.get("author_name") == "广告":
                         continue
+                    article_time = self._get_strategy_article_time(article)
+                    if article_time is not None and article_time < cutoff_time:
+                        reached_cutoff = True
+                        continue
                     fetched_articles.append(article)
 
+                if reached_cutoff:
+                    logger.debug("作者 %s 已同步到一周前文章，停止继续翻页", author)
+                    break
                 if len(articles) < page_size:
                     break
                 begin += page_size
