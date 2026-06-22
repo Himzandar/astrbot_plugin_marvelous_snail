@@ -120,42 +120,47 @@ async def send_msg(event: AstrMessageEvent, msg: str) -> int | None:
 
 
 # ====================== AES 加密工具（个保法合规必备） ======================
-SECRET_KEY = b"a7s9d2k4f6g5h3j1q8w2e4r6t7y0u5i"  # 自己改一个
 
 
-def get_fernet():
+def get_fernet(secret_key: str):
     """生成 Fernet 对象用于加密和解密
+    Args:
+        secret_key: 配置中填写的加密密钥
     Returns:
         Fernet 对象
     """
+    if not isinstance(secret_key, str) or not secret_key.strip():
+        raise ValueError("未配置 encryption_secret_key，无法执行加解密")
     kdf = PBKDF2HMAC(
         algorithm=hashes.SHA256(),
         length=32,
         salt=b"Himzandar",
         iterations=100000,
     )
-    key = base64.urlsafe_b64encode(kdf.derive(SECRET_KEY))
+    key = base64.urlsafe_b64encode(kdf.derive(secret_key.strip().encode("utf-8")))
     return Fernet(key)
 
 
-def encrypt_data(text: str) -> str:
+def encrypt_data(text: str, secret_key: str) -> str:
     """加密数据，返回加密后的字符串
     Args:
         text: 要加密的文本
+        secret_key: 配置中填写的加密密钥
     Returns:
         加密后的字符串
     """
-    return get_fernet().encrypt(text.encode()).decode()
+    return get_fernet(secret_key).encrypt(text.encode()).decode()
 
 
-def decrypt_data(token: str) -> str:
+def decrypt_data(token: str, secret_key: str) -> str:
     """解密数据，返回解密后的字符串
     Args:
         token: 要解密的字符串
+        secret_key: 配置中填写的加密密钥
     Returns:
         解密后的字符串
     """
-    return get_fernet().decrypt(token.encode()).decode()
+    return get_fernet(secret_key).decrypt(token.encode()).decode()
 
 
 def convert_to_query_bytes(data, account, page_id=1):
