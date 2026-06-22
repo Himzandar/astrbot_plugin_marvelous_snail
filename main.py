@@ -14,6 +14,9 @@ class MarvelousSnailPlugin(
 ):
     """最强蜗牛插件，集成了账号管理和攻略查询功能，提供丰富的命令接口供用户使用。"""
 
+    async def terminate(self) -> None:
+        await super().terminate()
+
     @command_group("最强蜗牛")
     def zqwn(self):
         """最强蜗牛攻略相关功能

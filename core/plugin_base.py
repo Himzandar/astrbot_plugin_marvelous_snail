@@ -125,9 +125,14 @@ class MarvelousSnailPluginBase(Star):
             None
         """
         logger.info("最强蜗牛插件已卸载")
-        if self.scheduler.running:
-            self.scheduler.shutdown()
+        if not self.scheduler.running:
+            logger.info("调度器未运行，无需关闭")
+            return
+        try:
+            self.scheduler.shutdown(wait=False)
             logger.info("调度器已关闭,已停止所有定时任务")
+        except Exception as e:
+            logger.error(f"调度器关闭失败: {e}")
 
     async def _start_auto_job(self, job_id: str, cron_expr: str, func, args=None):
         """设置定时任务。
