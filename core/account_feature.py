@@ -30,6 +30,18 @@ else:
 class AccountFeatureMixin(AccountFeatureBase):
     """最强蜗牛账号管理功能，包括账号绑定、查询、删除和定时签到等功能。"""
 
+    def _get_encryption_secret_key(self) -> str:
+        secret_key = self.config.get("encryption_secret_key", "")
+        if not isinstance(secret_key, str) or not secret_key.strip():
+            raise ValueError("未配置 encryption_secret_key，无法执行账号数据加解密")
+        return secret_key.strip()
+
+    def _encrypt_data(self, text: str) -> str:
+        return encrypt_data(text, self._get_encryption_secret_key())
+
+    def _decrypt_data(self, token: str) -> str:
+        return decrypt_data(token, self._get_encryption_secret_key())
+
     def _prepare_scheduled_user_files(
         self,
         task_name: str,
@@ -108,7 +120,7 @@ class AccountFeatureMixin(AccountFeatureBase):
         invalid_account_count = 0
         for user in users:
             try:
-                role_id = decrypt_data(user["role_id"])
+                role_id = self._decrypt_data(user["role_id"])
             except Exception as exc:
                 logger.error(f"解密用户 {user_id} 的角色数据失败: {exc}")
                 invalid_account_count += 1
@@ -237,8 +249,8 @@ class AccountFeatureMixin(AccountFeatureBase):
                             )
                         )
                     )
-                    encrypted_account = encrypt_data(account)
-                    encrypted_role_id = encrypt_data(selected_user["role_id"])
+                    encrypted_account = self._encrypt_data(account)
+                    encrypted_role_id = self._encrypt_data(selected_user["role_id"])
                     sender_id = event.get_sender_id().replace("/", "_")
                     user_data = self._load_user_data(sender_id) or {
                         "num": 0,
@@ -413,8 +425,10 @@ class AccountFeatureMixin(AccountFeatureBase):
                     )
 
                     user_record = {
-                        "account": encrypt_data(phone),
-                        "role_id": encrypt_data(str(selected_user.get("role_id", uid))),
+                        "account": self._encrypt_data(phone),
+                        "role_id": self._encrypt_data(
+                            str(selected_user.get("role_id", uid))
+                        ),
                         "info": selected_info,
                         "sign_status": self._build_sign_status(
                             "success" if sign_ok else "failed",
@@ -731,8 +745,8 @@ class AccountFeatureMixin(AccountFeatureBase):
                             current_role=info,
                         )
                         try:
-                            account = decrypt_data(user["account"])
-                            role_id = decrypt_data(user["role_id"])
+                            account = self._decrypt_data(user["account"])
+                            role_id = self._decrypt_data(user["role_id"])
                         except Exception as exc:
                             logger.error(f"解密用户 {user_id} 的账号数据失败: {exc}")
                             self._set_user_sign_status(
@@ -1052,8 +1066,8 @@ class AccountFeatureMixin(AccountFeatureBase):
                 bound_game_id = self._get_bound_game_id(chosen_user)
 
                 try:
-                    account = decrypt_data(chosen_user["account"])
-                    role_id = decrypt_data(chosen_user["role_id"])
+                    account = self._decrypt_data(chosen_user["account"])
+                    role_id = self._decrypt_data(chosen_user["role_id"])
                 except Exception as e:
                     logger.warning(f"keep_sign_in 解密用户 {user_id} 数据失败: {e}")
                     continue
