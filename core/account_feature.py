@@ -685,6 +685,13 @@ class AccountFeatureMixin(AccountFeatureBase):
             started_at=started_at,
         )
 
+        if self.scheduler.get_job("keep_sign_in_job"):
+            try:
+                self.scheduler.pause_job("keep_sign_in_job")
+                logger.info("自动签到开始，已暂停 keep_sign_in_job 保活任务")
+            except Exception as exc:
+                logger.error(f"暂停 keep_sign_in_job 失败: {exc}")
+
         try:
             for index, user_file in enumerate(user_files, start=1):
                 user_id = user_file.stem
@@ -1017,6 +1024,12 @@ class AccountFeatureMixin(AccountFeatureBase):
             elif not group_targets:
                 logger.info("未配置群聊定时签到汇总推送目标，已跳过汇总消息发送")
         finally:
+            if self.scheduler.get_job("keep_sign_in_job"):
+                try:
+                    self.scheduler.resume_job("keep_sign_in_job")
+                    logger.info("自动签到结束，已恢复 keep_sign_in_job 保活任务")
+                except Exception as exc:
+                    logger.error(f"恢复 keep_sign_in_job 失败: {exc}")
             self._set_auto_sign_progress(
                 running=False,
                 completed_users=len(user_files),
