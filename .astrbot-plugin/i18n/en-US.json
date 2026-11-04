@@ -1,0 +1,15 @@
+{
+  "metadata": {
+    "display_name": "Marvelous Snail"
+  },
+  "pages": {
+    "manager": {
+      "title": "Marvelous Snail Manager"
+    }
+  },
+  "views": {
+    "manager": {
+      "title": "Marvelous Snail Manager"
+    }
+  }
+}

@@ -1,7 +1,9 @@
 import ast
+import asyncio
 import json
 import random
 import time
+from collections import defaultdict
 from pathlib import Path
 from typing import Any
 
@@ -22,10 +24,30 @@ from astrbot.core.utils.astrbot_path import (
 )
 
 from .parse import Parse
-from .sign_in import activity_gift_claim
-from .utils import cron_to_human, get_week
+from .sign_in import (
+    CHANNEL_GAME_ID,
+    CHANNEL_PLATFORM_NAMES,
+    activity_gift_claim,
+    binds_channel_account,
+    sign_request,
+)
+from .signin_preferences import load_sign_push_payload, load_signin_settings
+from .utils import atomic_write_json, cron_to_human, get_week
 
 PLUGIN_NAME = "astrbot_plugin_marvelous_snail"
+
+SIGNIN_SUMMARY_MAX_LINES = 20
+SIGNIN_SUMMARY_MAX_CHARS = 1800
+SIGNIN_SUMMARY_TEXT_MAX_CHARS = 1500
+SIGNIN_SUMMARY_IMAGES_PER_BATCH = 3
+SIGNIN_SUMMARY_MAX_IMAGE_BYTES = 4 * 1024 * 1024
+SIGNIN_SUMMARY_TEXT_NODES_PER_BATCH = 4
+SIGNIN_SUMMARY_SEND_INTERVAL_SECONDS = 0.8
+SIGNIN_SUMMARY_RETRY_DELAY_SECONDS = 2.0
+DOWNLOAD_TIMEOUT = aiohttp.ClientTimeout(total=30, connect=10)
+MAX_DOWNLOAD_BYTES = 10 * 1024 * 1024
+CRON_MISFIRE_GRACE_SECONDS = 300
+INTERVAL_MISFIRE_GRACE_SECONDS = 30
 
 
 class MarvelousSnailPluginBase(Star):
@@ -44,7 +66,9 @@ class MarvelousSnailPluginBase(Star):
         self.cache_dir = Path(get_astrbot_temp_path()) / PLUGIN_NAME
         self.randomizer = random.SystemRandom()
         self.scheduler = AsyncIOScheduler()
-        self.authors = {}
+        # Per-sender search results: an index must only be valid for the
+        # administrator who originally performed the search.
+        self.authors: dict[str, dict[int, dict[str, str]]] = {}
         self.headers = self._parse_headers_config(config.get("headers", "{}"))
         self.style = None
         self._fugitives_data_cache: dict[str, Any] | None = None
@@ -57,6 +81,7 @@ class MarvelousSnailPluginBase(Star):
             "started_at": None,
             "last_finished_at": None,
         }
+        self._auto_sign_lock = asyncio.Lock()
 
     async def get_saved_account(self):
         """由strategy_feature提供实现。
@@ -79,6 +104,14 @@ class MarvelousSnailPluginBase(Star):
         """
         raise NotImplementedError()
 
+    async def sync_web_bindings(self):
+        """由 web_binding 模块提供实现。"""
+        raise NotImplementedError()
+
+    async def auto_sign_web_bindings(self) -> int:
+        """由 web_binding 模块提供实现。"""
+        raise NotImplementedError()
+
     async def initialize(self):
         """插件初始化
         Returns:
@@ -88,6 +121,25 @@ class MarvelousSnailPluginBase(Star):
         self.parse = Parse()
         self.data_dir.mkdir(parents=True, exist_ok=True)
         self.cache_dir.mkdir(parents=True, exist_ok=True)
+
+        try:
+            from .admin_page import SnailAdminPageController
+
+            SnailAdminPageController(self.context, self).register_routes()
+            logger.info("最强蜗牛管理页 API 已注册")
+        except Exception as exc:
+            logger.warning(f"最强蜗牛管理页 API 注册失败: {exc}")
+
+        try:
+            cleanup_result = self._cleanup_cross_user_duplicates()
+            if cleanup_result["removed"]:
+                logger.info(
+                    "重复角色清理完成：移除 "
+                    f"{cleanup_result['removed']} 条，涉及 "
+                    f"{cleanup_result['affected_qqs']} 个 QQ"
+                )
+        except Exception as exc:
+            logger.warning(f"启动时清理重复角色失败: {exc}")
 
         try:
             import pillowmd
@@ -111,8 +163,38 @@ class MarvelousSnailPluginBase(Star):
                 "auto_sign_in_job", "10 8 * * *", self.auto_sign_in
             )
             await self._start_auto_job(
-                "keep_sign_in_job", "*/30 * * * *", self.keep_sign_in
+                "keep_sign_in_job", "*/30 * * * *", self._run_keep_sign_in
             )
+            if self.config.get("web_portal_url") and self.config.get(
+                "web_portal_sync_token"
+            ):
+                if self.scheduler.get_job("web_binding_sync_job"):
+                    self.scheduler.remove_job("web_binding_sync_job")
+                self.scheduler.add_job(
+                    self.sync_web_bindings,
+                    trigger="interval",
+                    seconds=5,
+                    id="web_binding_sync_job",
+                    max_instances=1,
+                    coalesce=True,
+                    misfire_grace_time=INTERVAL_MISFIRE_GRACE_SECONDS,
+                )
+                logger.info("网页绑定同步任务已启用，每 5 秒拉取一次")
+                if self.scheduler.get_job("web_auto_sign_job"):
+                    self.scheduler.remove_job("web_auto_sign_job")
+                self.scheduler.add_job(
+                    self.auto_sign_web_bindings,
+                    trigger="interval",
+                    seconds=5,
+                    id="web_auto_sign_job",
+                    max_instances=1,
+                    coalesce=True,
+                    misfire_grace_time=INTERVAL_MISFIRE_GRACE_SECONDS,
+                )
+                logger.info("网页自动签到任务已启用，每 5 秒检查一次")
+
+            else:
+                logger.warning("未配置网页绑定服务，已跳过网页绑定同步任务")
         else:
             logger.warning("未配置 headers，已跳过自动签到相关定时任务")
 
@@ -171,6 +253,11 @@ class MarvelousSnailPluginBase(Star):
                 trigger=trigger,
                 id=job_id,
                 args=args,
+                # Long-running network jobs must not overlap after a slow or
+                # delayed scheduler tick.
+                max_instances=1,
+                coalesce=True,
+                misfire_grace_time=CRON_MISFIRE_GRACE_SECONDS,
             )
             try:
                 human_cron = cron_to_human(cron_expr)
@@ -268,6 +355,24 @@ class MarvelousSnailPluginBase(Star):
             str: 绑定的 game_id，如果不存在则返回默认值 "39"。
         """
         return str(user_data.get("game_id", "39"))
+
+    @staticmethod
+    def _is_channel_record(user_data: dict[str, Any]) -> bool:
+        """判断绑定记录是否属于渠道服。"""
+        return str(user_data.get("binding_type", "")).strip().lower() == "channel"
+
+    @staticmethod
+    def _get_channel_platform(user_data: dict[str, Any]) -> str:
+        """读取渠道服平台编码。"""
+        return str(user_data.get("platform", "")).strip().lower()
+
+    @staticmethod
+    def _format_channel_role_info(platform: str, role_name: str) -> str:
+        """格式化渠道服角色展示信息。"""
+        platform_name = CHANNEL_PLATFORM_NAMES.get(
+            str(platform).strip().lower(), str(platform)
+        )
+        return f"[渠道服·{platform_name}] {role_name}"
 
     @staticmethod
     def _set_bound_game_id(user_data: dict[str, Any], game_id: Any) -> None:
@@ -424,9 +529,10 @@ class MarvelousSnailPluginBase(Star):
         Returns:
             bytes | None: 下载的文件字节流，如果下载失败则返回 None。
         """
+        # Some OneBot file callbacks expose HTTPS URLs on an HTTP-only host.
         normalized_url = url.replace("https://", "http://")
         try:
-            async with aiohttp.ClientSession() as session:
+            async with aiohttp.ClientSession(timeout=DOWNLOAD_TIMEOUT) as session:
                 async with session.get(normalized_url) as response:
                     if response.status != 200:
                         logger.error(
@@ -435,7 +541,22 @@ class MarvelousSnailPluginBase(Star):
                             normalized_url,
                         )
                         return None
-                    return await response.read()
+                    content_length = response.content_length
+                    if (
+                        content_length is not None
+                        and content_length > MAX_DOWNLOAD_BYTES
+                    ):
+                        logger.error(
+                            "下载文件超过大小限制: %s bytes, url: %s",
+                            content_length,
+                            normalized_url,
+                        )
+                        return None
+                    content = await response.content.read(MAX_DOWNLOAD_BYTES + 1)
+                    if len(content) > MAX_DOWNLOAD_BYTES:
+                        logger.error("下载文件超过大小限制，url: %s", normalized_url)
+                        return None
+                    return content
         except Exception as exc:
             logger.error(f"下载文件失败: {exc}")
             return None
@@ -503,29 +624,58 @@ class MarvelousSnailPluginBase(Star):
 
         return payload, None
 
-    def _split_markdown_chunks(self, content: str, max_lines: int = 50) -> list[str]:
+    def _split_markdown_chunks(
+        self,
+        content: str,
+        max_lines: int = 50,
+        max_chars: int | None = None,
+    ) -> list[str]:
         """按行数切分 Markdown，避免单张图片过长。
         Args:
             content: Markdown 内容。
             max_lines: 每个分片的最大行数。
+            max_chars: 每个分片的最大字符数，None 表示不限制。
         Returns:
             list[str]: 分片后的 Markdown 列表。
         """
         lines = content.splitlines()
-        if len(lines) <= max_lines:
-            return [content]
+        chunks: list[str] = []
+        current: list[str] = []
+        current_chars = 0
+        line_limit = max(1, int(max_lines or 1))
 
-        chunks = []
-        for index in range(0, len(lines), max_lines):
-            chunk = "\n".join(lines[index : index + max_lines]).strip()
+        def flush() -> None:
+            nonlocal current, current_chars
+            chunk = "\n".join(current).strip()
             if chunk:
                 chunks.append(chunk)
+            current = []
+            current_chars = 0
+
+        for line in lines:
+            line_length = len(line)
+            exceeds_chars = bool(
+                max_chars and current and current_chars + line_length + 1 > max_chars
+            )
+            if current and (len(current) >= line_limit or exceeds_chars):
+                flush()
+            current.append(line)
+            current_chars += line_length + 1
+        flush()
         return chunks or [content]
 
-    async def _render_markdown_chunks(self, content: str) -> list[str]:
+    async def _render_markdown_chunks(
+        self,
+        content: str,
+        *,
+        max_lines: int = 50,
+        max_chars: int | None = None,
+    ) -> list[str]:
         """将 Markdown 分片渲染为多张图片，返回图片路径列表。
         Args:
             content: Markdown 内容。
+            max_lines: 每个分片的最大行数。
+            max_chars: 每个分片的最大字符数。
         Returns:
             list[str]: 渲染后的图片路径列表。
         """
@@ -534,10 +684,12 @@ class MarvelousSnailPluginBase(Star):
             raise RuntimeError("Markdown style is not available")
 
         image_paths: list[str] = []
-        for chunk in self._split_markdown_chunks(content):
+        for chunk in self._split_markdown_chunks(content, max_lines, max_chars):
             img = await style.AioRender(text=chunk, useImageUrl=True)
             img_path = img.Save(self.cache_dir)
             image_paths.append(str(img_path))
+        if not image_paths:
+            raise RuntimeError("Markdown renderer returned no images")
         return image_paths
 
     def _build_forward_nodes(
@@ -736,43 +888,148 @@ class MarvelousSnailPluginBase(Star):
         if stop_event:
             event.stop_event()
 
-    async def _send_rendered_message(
+    @staticmethod
+    def _batch_image_paths(image_paths: list[str]) -> list[list[str]]:
+        """按数量与总字节数切分图片，避免单个转发节点过大。"""
+        batches: list[list[str]] = []
+        current: list[str] = []
+        current_bytes = 0
+        for image_path in image_paths:
+            try:
+                image_bytes = max(0, Path(image_path).stat().st_size)
+            except OSError:
+                image_bytes = 0
+            exceeds_bytes = bool(
+                current and current_bytes + image_bytes > SIGNIN_SUMMARY_MAX_IMAGE_BYTES
+            )
+            if current and (
+                len(current) >= SIGNIN_SUMMARY_IMAGES_PER_BATCH or exceeds_bytes
+            ):
+                batches.append(current)
+                current = []
+                current_bytes = 0
+            current.append(image_path)
+            current_bytes += image_bytes
+        if current:
+            batches.append(current)
+        return batches
+
+    async def _send_summary_chain_with_retry(
+        self,
+        target: str,
+        chain: MessageChain,
+        *,
+        label: str,
+    ) -> bool:
+        """发送一条汇总消息，失败时等待后重试一次。"""
+        for attempt in range(2):
+            try:
+                await self.context.send_message(target, chain)  # type: ignore
+                return True
+            except Exception as exc:
+                if attempt == 0:
+                    logger.warning(f"{label}发送失败，2 秒后重试: {exc}")
+                    await asyncio.sleep(SIGNIN_SUMMARY_RETRY_DELAY_SECONDS)
+                else:
+                    logger.error(f"{label}重试后仍失败: {exc}")
+        return False
+
+    async def _send_signin_summary_to_target(
         self,
         target: str,
         content: str,
+        image_paths: list[str],
         *,
-        msg: str | None = None,
-        extra_image_path: str | None = None,
-    ) -> None:
-        """向指定目标发送渲染后的图片消息。
-        Args:
-            target: 目标 ID。
-            content: 消息内容。
-            msg: 可选的消息标题。
-            extra_image_path: 可选的额外图片路径。
-        Returns:
-            None
-        """
+        reward_image_path: str | None = None,
+    ) -> bool:
+        """向单个目标发送分页签到汇总，并在需要时降级为文本。"""
+        sent = True
+        if image_paths:
+            image_batches = self._batch_image_paths(image_paths)
+            for index, batch in enumerate(image_batches):
+                if len(batch) == 1:
+                    chain = MessageChain().file_image(batch[0])
+                else:
+                    forward = self._build_forward_nodes(batch, "最强蜗牛签到", "0")
+                    chain = MessageChain(chain=[forward])
+                if not await self._send_summary_chain_with_retry(
+                    target,
+                    chain,
+                    label=f"签到汇总图片批次 {index + 1} ",
+                ):
+                    sent = False
+                if index < len(image_batches) - 1:
+                    await asyncio.sleep(SIGNIN_SUMMARY_SEND_INTERVAL_SECONDS)
+        else:
+            text_chunks = self._split_markdown_chunks(
+                content,
+                SIGNIN_SUMMARY_MAX_LINES,
+                SIGNIN_SUMMARY_TEXT_MAX_CHARS,
+            )
+            for start in range(
+                0, len(text_chunks), SIGNIN_SUMMARY_TEXT_NODES_PER_BATCH
+            ):
+                batch = text_chunks[start : start + SIGNIN_SUMMARY_TEXT_NODES_PER_BATCH]
+                if len(batch) == 1:
+                    chain = MessageChain().message(batch[0])
+                else:
+                    forward = self._build_text_forward_nodes(batch, "最强蜗牛签到", "0")
+                    chain = MessageChain(chain=[forward])
+                if not await self._send_summary_chain_with_retry(
+                    target,
+                    chain,
+                    label="签到汇总文本批次 ",
+                ):
+                    sent = False
+                if start + len(batch) < len(text_chunks):
+                    await asyncio.sleep(SIGNIN_SUMMARY_SEND_INTERVAL_SECONDS)
+
+        if reward_image_path:
+            reward_chain = MessageChain().file_image(reward_image_path)
+            reward_sent = await self._send_summary_chain_with_retry(
+                target,
+                reward_chain,
+                label="签到奖励图片 ",
+            )
+            if not reward_sent:
+                logger.warning(f"签到汇总已处理，但奖励图片发送失败: {target}")
+        return sent
+
+    async def _send_signin_summary_to_targets(
+        self,
+        targets: list[str],
+        content: str,
+        *,
+        reward_image_path: str | None = None,
+    ) -> dict[str, bool]:
+        """渲染一次签到汇总，并向全部目标分批发送。"""
+        image_paths: list[str] = []
         if self.style:
             try:
-                render_text = self._build_markdown_render_text(content, msg)
-                image_paths = await self._render_markdown_chunks(render_text)
-                if extra_image_path:
-                    image_paths.append(extra_image_path)
-                if len(image_paths) > 1:
-                    await self._send_forward_images_to_target(target, image_paths)
-                else:
-                    message_chain = MessageChain().file_image(image_paths[0])
-                    await self.context.send_message(target, message_chain)  # type: ignore
-                return
-            except Exception as e:
-                logger.error(f"渲染推送图片失败，已回退文本输出：{e}")
+                image_paths = await self._render_markdown_chunks(
+                    content,
+                    max_lines=SIGNIN_SUMMARY_MAX_LINES,
+                    max_chars=SIGNIN_SUMMARY_MAX_CHARS,
+                )
+            except Exception as exc:
+                logger.error(f"渲染签到汇总失败，将回退为分页文本：{exc}")
+                image_paths = []
 
-        fallback = f"{msg}\n\n{content}" if msg else content
-        message_chain = MessageChain().message(fallback)
-        if extra_image_path:
-            message_chain.file_image(extra_image_path)
-        await self.context.send_message(target, message_chain)  # type: ignore
+        results: dict[str, bool] = {}
+        for index, target in enumerate(targets):
+            try:
+                results[target] = await self._send_signin_summary_to_target(
+                    target,
+                    content,
+                    image_paths,
+                    reward_image_path=reward_image_path,
+                )
+            except Exception as exc:
+                logger.error(f"发送签到汇总到 {target} 时发生异常: {exc}")
+                results[target] = False
+            if index < len(targets) - 1:
+                await asyncio.sleep(SIGNIN_SUMMARY_SEND_INTERVAL_SECONDS)
+        return results
 
     def _get_today_reward_image_path(self) -> str:
         """根据当前星期返回今日奖励配图路径。
@@ -790,12 +1047,154 @@ class MarvelousSnailPluginBase(Star):
         ]
         return str(self.plugin_dir / "week" / weeks[get_week()])
 
+    def _role_identity_from_user(
+        self, user: dict[str, Any]
+    ) -> tuple[str, str, str] | None:
+        if self._is_channel_record(user):
+            platform = self._get_channel_platform(user)
+            if not platform:
+                return None
+            try:
+                role_id = self._decrypt_data(str(user["role_id"]))
+            except Exception:
+                return None
+            return (f"channel:{platform}", "", str(role_id))
+        try:
+            account = self._decrypt_data(str(user["account"]))
+            role_id = self._decrypt_data(str(user["role_id"]))
+        except Exception:
+            return None
+        return (str(account), self._get_bound_game_id(user), str(role_id))
+
+    def _find_role_owner(
+        self,
+        account: str,
+        game_id: str,
+        role_id: str,
+        requester_user_id: str | None = None,
+    ) -> str | None:
+        """查找指定角色的 QQ 所有者。
+
+        如果历史数据中同一角色绑定在多个 QQ 下，优先选择绑定账号数量更少的
+        QQ；账号数相同则选择角色总数更少、QQ 字典序更小的用户，保证结果稳定。
+        """
+        target = (str(account), str(game_id), str(role_id))
+        matches: list[tuple[int, int, str]] = []
+        user_dir = self._get_user_dir()
+        if not user_dir.exists():
+            return None
+        for user_file in sorted(user_dir.glob("*.json")):
+            user_data = self._load_user_data(user_file.stem)
+            users = user_data.get("users", []) if isinstance(user_data, dict) else []
+            if not isinstance(users, list):
+                continue
+            accounts: set[str] = set()
+            matched = False
+            for user in users:
+                identity = self._role_identity_from_user(user)
+                if identity is None:
+                    continue
+                accounts.add(identity[0])
+                if identity == target:
+                    matched = True
+            if matched:
+                matches.append((len(accounts), len(users), user_file.stem))
+        if not matches:
+            return None
+        matches.sort()
+        return matches[0][2]
+
+    def _cleanup_cross_user_duplicates(self) -> dict[str, int]:
+        """清理跨 QQ 重复角色。
+
+        保留优先级：绑定账号数更少的 QQ > 角色总数更少的 QQ > QQ 字典序更小的。
+        同一 QQ 内同账号、同服务器、同角色 ID 也只保留一条。
+        """
+        user_dir = self._get_user_dir()
+        if not user_dir.exists():
+            return {"removed": 0, "affected_qqs": 0, "groups": 0}
+
+        documents: dict[str, dict[str, Any]] = {}
+        stats: dict[str, tuple[int, int, str]] = {}
+        occurrences: dict[tuple[str, str, str], list[tuple[str, int]]] = defaultdict(
+            list
+        )
+
+        for user_file in sorted(user_dir.glob("*.json")):
+            user_data = self._load_user_data(user_file.stem)
+            if not isinstance(user_data, dict):
+                continue
+            users = user_data.get("users", [])
+            if not isinstance(users, list) or not users:
+                continue
+            qq = user_file.stem
+            documents[qq] = user_data
+            accounts: set[str] = set()
+            for index, user in enumerate(users):
+                identity = self._role_identity_from_user(user)
+                if identity is None:
+                    continue
+                accounts.add(identity[0])
+                occurrences[identity].append((qq, index))
+            stats[qq] = (len(accounts), len(users), qq)
+
+        removed_by_qq: dict[str, set[int]] = defaultdict(set)
+        duplicate_groups = {
+            identity: owners
+            for identity, owners in occurrences.items()
+            if len(owners) > 1
+        }
+        for owners in duplicate_groups.values():
+            owner_qqs = sorted({qq for qq, _ in owners}, key=lambda qq: stats[qq])
+            keep_qq = owner_qqs[0]
+            keep_index = min(index for qq, index in owners if qq == keep_qq)
+            for qq, index in owners:
+                if qq != keep_qq or index != keep_index:
+                    removed_by_qq[qq].add(index)
+
+        removed = 0
+        for qq, indexes in removed_by_qq.items():
+            user_data = documents.get(qq)
+            if not isinstance(user_data, dict):
+                continue
+            users = user_data.get("users", [])
+            if not isinstance(users, list):
+                continue
+            remaining = [
+                user for index, user in enumerate(users) if index not in indexes
+            ]
+            removed += len(users) - len(remaining)
+            if remaining:
+                self._save_user_data(qq, {"num": len(remaining), "users": remaining})
+            else:
+                self._get_user_file(qq).unlink(missing_ok=True)
+
+        return {
+            "removed": removed,
+            "affected_qqs": len(removed_by_qq),
+            "groups": len(duplicate_groups),
+        }
+
     def _get_user_dir(self) -> Path:
         """获取用户数据目录路径。
         Returns:
             Path: 用户数据目录路径。
         """
         return self.data_dir / "users"
+
+    @staticmethod
+    def _validate_data_name(value: Any, label: str) -> str:
+        """Validate one filename component before joining it to a data directory."""
+        name = str(value).strip()
+        if (
+            not name
+            or name in {".", ".."}
+            or "/" in name
+            or "\\" in name
+            or "\x00" in name
+        ):
+            raise ValueError(f"{label}格式无效")
+        return name
 
     def _get_user_file(self, user_id: str) -> Path:
         """获取指定用户的文件路径。
@@ -804,7 +1203,8 @@ class MarvelousSnailPluginBase(Star):
         Returns:
             Path: 用户文件路径。
         """
-        return self._get_user_dir() / f"{user_id}.json"
+        safe_user_id = self._validate_data_name(user_id, "用户 ID")
+        return self._get_user_dir() / f"{safe_user_id}.json"
 
     def _load_user_data(self, user_id: str) -> dict[str, Any] | None:
         """加载指定用户的数据。
@@ -831,7 +1231,8 @@ class MarvelousSnailPluginBase(Star):
         return data
 
     def _save_user_data(self, user_id: str, data: dict[str, Any]) -> bool:
-        """保存指定用户的数据。
+        """Atomically save one user's bindings.
+
         Args:
             user_id: 用户 ID。
             data: 用户数据。
@@ -839,11 +1240,9 @@ class MarvelousSnailPluginBase(Star):
             bool: 保存是否成功。
         """
         user_file = self._get_user_file(user_id)
-        user_file.parent.mkdir(parents=True, exist_ok=True)
 
         try:
-            with user_file.open("w", encoding="utf-8") as f:
-                json.dump(data, f, ensure_ascii=False, indent=4)
+            atomic_write_json(user_file, data)
             return True
         except Exception as e:
             logger.error(f"写入用户数据失败: {e}")
@@ -863,21 +1262,51 @@ class MarvelousSnailPluginBase(Star):
             "updated_at": int(time.time()),
         }
 
+    def _classify_sign_result(self, sign_result: Any) -> str:
+        """分类签到接口结果，区分本次签到成功与今日已领取。
+        Args:
+            sign_result: 签到接口返回结果。
+        Returns:
+            str: success、already_claimed 或 failed。
+        """
+        if not isinstance(sign_result, dict):
+            return "failed"
+
+        message = " ".join(str(sign_result.get("message", "")).split())
+        if any(
+            phrase in message
+            for phrase in ("已经领取过了", "已经领取", "已领取过了", "今日已领取")
+        ):
+            return "already_claimed"
+
+        if sign_result.get("code") == 200:
+            return "success"
+        return "failed"
+
     def _is_sign_success(self, sign_result: Any) -> bool:
-        """判断签到接口结果是否应视为成功。
+        """判断签到接口结果是否表示本次签到成功。
         Args:
             sign_result: 签到接口返回结果。
         Returns:
             bool: 是否签到成功。
         """
-        if not isinstance(sign_result, dict):
-            return False
+        return self._classify_sign_result(sign_result) == "success"
 
-        if sign_result.get("code") == 200:
-            return True
-
-        message = str(sign_result.get("message", ""))
-        return "很抱歉,已经领取过了" in message
+    def _format_sign_result_message(self, sign_result: Any) -> tuple[str, str]:
+        """返回签到状态和展示消息，避免把接口执行成功误报为签到成功。"""
+        state = self._classify_sign_result(sign_result)
+        message = (
+            str(sign_result.get("message", "")).strip()
+            if isinstance(sign_result, dict)
+            else ""
+        )
+        if not message:
+            message = {
+                "success": "签到成功",
+                "already_claimed": "今日奖励已领取",
+                "failed": "签到失败",
+            }[state]
+        return state, message
 
     def _set_user_sign_status(
         self, user: dict[str, Any], state: str, message: str
@@ -906,6 +1335,7 @@ class MarvelousSnailPluginBase(Star):
                 "messages": ["活动礼包领取结果无效"],
                 "claimed_gifts": [],
                 "failed_gifts": [],
+                "failed_reasons": ["活动礼包领取结果无效"],
             }
 
         success_count = 0
@@ -913,10 +1343,12 @@ class MarvelousSnailPluginBase(Star):
         messages: list[str] = []
         claimed_gifts: list[str] = []
         failed_gifts: list[str] = []
+        failed_reasons: list[str] = []
         for result in gift_results:
             if not isinstance(result, dict):
                 failed_count += 1
                 messages.append("活动礼包领取结果格式异常")
+                failed_reasons.append("活动礼包领取结果格式异常")
                 continue
 
             message = str(result.get("message", "未知结果"))
@@ -930,6 +1362,7 @@ class MarvelousSnailPluginBase(Star):
                 failed_count += 1
                 if gift_name:
                     failed_gifts.append(gift_name)
+                failed_reasons.append(message)
 
         return {
             "success_count": success_count,
@@ -937,7 +1370,179 @@ class MarvelousSnailPluginBase(Star):
             "messages": messages,
             "claimed_gifts": claimed_gifts,
             "failed_gifts": failed_gifts,
+            "failed_reasons": failed_reasons,
         }
+
+    @staticmethod
+    def _format_channel_gift_message(gift_summary: dict[str, Any] | None) -> str:
+        """将渠道服礼包汇总转换为可直接展示的文案。"""
+        if not isinstance(gift_summary, dict):
+            return ""
+        claimed = [
+            str(item).strip()
+            for item in gift_summary.get("claimed_gifts", [])
+            if str(item).strip()
+        ]
+        if int(gift_summary.get("success_count", 0) or 0) > 0:
+            return "礼包已领取：" + ("、".join(claimed) if claimed else "成功")
+        if int(gift_summary.get("failed_count", 0) or 0) > 0:
+            reasons = [
+                str(item).strip()
+                for item in gift_summary.get("failed_reasons", [])
+                if str(item).strip()
+            ]
+            return "礼包领取失败：" + ("；".join(reasons) if reasons else "未知错误")
+        if gift_summary.get("skipped"):
+            reason = str(gift_summary.get("skip_reason", "")).strip()
+            return "礼包：" + (reason or "本次跳过")
+        return "礼包：没有可领取"
+
+    async def _sign_channel_record(
+        self,
+        user: dict[str, Any],
+        *,
+        claim_gifts: bool = True,
+    ) -> dict[str, Any]:
+        """绑定并签到单个渠道服角色，必要时领取活动礼包。"""
+        platform = self._get_channel_platform(user)
+        try:
+            role_id = self._decrypt_data(str(user["role_id"]))
+            role_name = self._decrypt_data(str(user["role_name"]))
+        except Exception:
+            message = "渠道角色数据解密失败"
+            self._set_user_sign_status(user, "invalid", message)
+            return {
+                "state": "invalid",
+                "sign_success": False,
+                "message": message,
+                "sign_message": "",
+                "gift_summary": {},
+            }
+        if platform not in CHANNEL_PLATFORM_NAMES or not role_id or not role_name:
+            message = "渠道角色数据不完整"
+            self._set_user_sign_status(user, "invalid", message)
+            return {
+                "state": "invalid",
+                "sign_success": False,
+                "message": message,
+                "sign_message": "",
+                "gift_summary": {},
+            }
+
+        try:
+            bind_result = await binds_channel_account(
+                self.headers, role_id, role_name, platform
+            )
+        except Exception as exc:
+            logger.warning(f"渠道服绑定异常: {exc}")
+            bind_result = {"code": -1, "message": "渠道服绑定请求异常"}
+        if not isinstance(bind_result, dict) or bind_result.get("code") != 200:
+            bind_message = (
+                str(bind_result.get("message", "未知错误"))
+                if isinstance(bind_result, dict)
+                else "未知错误"
+            )
+            message = f"渠道绑定失败：{bind_message}"
+            self._set_user_sign_status(user, "failed", message)
+            return {
+                "state": "failed",
+                "sign_success": False,
+                "message": message,
+                "sign_message": "",
+                "gift_summary": {},
+            }
+
+        try:
+            sign_result = await sign_request(self.headers, CHANNEL_GAME_ID)
+        except Exception as exc:
+            logger.warning(f"渠道服签到异常: {exc}")
+            sign_result = {"code": -1, "message": "签到请求异常"}
+        if not isinstance(sign_result, dict):
+            sign_result = {"code": -1, "message": "签到结果无效"}
+        sign_state, sign_message = self._format_sign_result_message(sign_result)
+        sign_success = sign_state == "success"
+
+        gift_summary: dict[str, Any] | None = None
+        if claim_gifts:
+            try:
+                gift_summary = await asyncio.wait_for(
+                    self._claim_activity_gifts_for_role(CHANNEL_GAME_ID, role_id),
+                    timeout=60,
+                )
+            except asyncio.TimeoutError:
+                gift_summary = {
+                    "success_count": 0,
+                    "failed_count": 1,
+                    "claimed_gifts": [],
+                    "failed_reasons": ["领取超时"],
+                    "has_claim_attempt": False,
+                }
+            except Exception as exc:
+                logger.warning(f"渠道服礼包领取失败: {exc}")
+                gift_summary = {
+                    "success_count": 0,
+                    "failed_count": 1,
+                    "claimed_gifts": [],
+                    "failed_reasons": ["领取异常"],
+                    "has_claim_attempt": False,
+                }
+        gift_message = self._format_channel_gift_message(gift_summary)
+
+        if sign_state == "success":
+            message = f"签到：{sign_message}"
+            state = "success"
+        elif sign_state == "already_claimed":
+            message = f"签到：{sign_message}"
+            state = "already_claimed"
+        else:
+            message = f"签到失败：{sign_message}"
+            state = "failed"
+        if gift_message:
+            message = f"{message}；{gift_message}"
+        self._set_user_sign_status(user, state, message)
+        return {
+            "state": state,
+            "sign_success": sign_success,
+            "message": message,
+            "sign_message": sign_message,
+            "gift_summary": gift_summary or {},
+        }
+
+    async def _keep_alive_channel_record(self, user: dict[str, Any]) -> bool:
+        """仅执行渠道服绑定以保持会话活性，不触发每日签到或礼包领取。"""
+        platform = self._get_channel_platform(user)
+        try:
+            role_id = self._decrypt_data(str(user["role_id"]))
+            role_name = self._decrypt_data(str(user["role_name"]))
+        except Exception as exc:
+            logger.warning(f"keep_sign_in 解密渠道角色失败: {exc}")
+            return False
+        if platform not in CHANNEL_PLATFORM_NAMES or not role_id or not role_name:
+            logger.warning("keep_sign_in 渠道角色数据不完整，已跳过")
+            return False
+        try:
+            result = await binds_channel_account(
+                self.headers, role_id, role_name, platform
+            )
+        except Exception as exc:
+            logger.warning(f"keep_sign_in 渠道服绑定异常: {exc}")
+            return False
+        if isinstance(result, dict) and result.get("code") == 200:
+            logger.info(
+                "keep_sign_in 渠道服绑定成功: "
+                f"{self._format_channel_role_info(platform, role_name)}"
+            )
+            return True
+        message = (
+            str(result.get("message", "未知错误"))
+            if isinstance(result, dict)
+            else "返回数据异常"
+        )
+        logger.warning(
+            "keep_sign_in 渠道服绑定失败: "
+            f"{self._format_channel_role_info(platform, role_name)} -> {message}"
+        )
+        return False
 
     async def _claim_activity_gifts_for_role(
         self, game_id: str, role_id: str
@@ -949,6 +1554,19 @@ class MarvelousSnailPluginBase(Star):
         Returns:
             dict[str, Any]: 活动礼包领取结果汇总。
         """
+        if self._get_signin_gift_mode() == "none":
+            return {
+                "success_count": 0,
+                "failed_count": 0,
+                "messages": ["礼包自动领取已关闭"],
+                "claimed_gifts": [],
+                "failed_gifts": [],
+                "failed_reasons": [],
+                "has_claim_attempt": False,
+                "skipped": True,
+                "skip_reason": "礼包自动领取已关闭",
+            }
+
         if not self.headers:
             return {
                 "success_count": 0,
@@ -956,7 +1574,9 @@ class MarvelousSnailPluginBase(Star):
                 "messages": ["未配置活动礼包请求头"],
                 "claimed_gifts": [],
                 "failed_gifts": [],
+                "failed_reasons": ["未配置活动礼包请求头"],
                 "has_claim_attempt": True,
+                "skipped": False,
             }
 
         gift_results = await activity_gift_claim(self.headers, game_id, role_id)
@@ -967,7 +1587,10 @@ class MarvelousSnailPluginBase(Star):
                 "messages": ["没有可领取的活动礼包"],
                 "claimed_gifts": [],
                 "failed_gifts": [],
+                "failed_reasons": [],
                 "has_claim_attempt": False,
+                "skipped": True,
+                "skip_reason": "没有可领取的活动礼包",
             }
 
         summary = self._summarize_activity_gift_results(gift_results)
@@ -977,7 +1600,9 @@ class MarvelousSnailPluginBase(Star):
             "messages": summary["messages"],
             "claimed_gifts": summary["claimed_gifts"],
             "failed_gifts": summary["failed_gifts"],
+            "failed_reasons": summary["failed_reasons"],
             "has_claim_attempt": True,
+            "skipped": False,
         }
 
     def _format_sign_status(self, user: dict[str, Any]) -> tuple[str, str, str]:
@@ -1002,26 +1627,43 @@ class MarvelousSnailPluginBase(Star):
 
         state_text = {
             "success": "已签到",
+            "already_claimed": "已领取",
             "failed": "签到失败",
             "invalid": "数据异常",
             "pending": "待签到",
         }.get(state, "暂无记录")
         return state_text, message, updated_text
 
-    def _get_group_sign_push_targets(self) -> list[str]:
-        """读取已登记的群聊汇总推送目标。
-        Returns:
-            list[str]: 群聊汇总推送目标列表。
-        """
-        data = self.read_file("push_datas", "sign.json") or {}
-        datas = data.get("datas", []) if isinstance(data, dict) else []
+    def _get_signin_gift_mode(self) -> str:
+        """读取签到礼包领取模式。"""
+        settings = load_signin_settings(self.data_dir)
+        return str(settings.get("gift", {}).get("claim_mode", "all"))
+
+    def _get_signin_notification_settings(self) -> dict[str, Any]:
+        """读取签到汇总通知设置。"""
+        settings = load_signin_settings(self.data_dir)
+        notification = settings.get("notification", {})
+        return notification if isinstance(notification, dict) else {}
+
+    def _get_sign_push_targets(self) -> list[str]:
+        """读取已启用且有效的签到通知目标。"""
+        if not self._get_signin_notification_settings().get("enabled", True):
+            return []
+        data = load_sign_push_payload(self.data_dir)
+        datas = data.get("datas", [])
         if not isinstance(datas, list):
             return []
+        return [
+            target.strip()
+            for target in datas
+            if isinstance(target, str) and target.strip()
+        ]
+
+    def _get_group_sign_push_targets(self) -> list[str]:
+        """读取已登记的群聊汇总推送目标。"""
         group_flag = f":{PlatformMessageType.GROUP_MESSAGE.value}:"
         return [
-            target
-            for target in datas
-            if isinstance(target, str) and group_flag in target
+            target for target in self._get_sign_push_targets() if group_flag in target
         ]
 
     def _get_author_cache_dir(self) -> Path:
@@ -1038,7 +1680,8 @@ class MarvelousSnailPluginBase(Star):
         Returns:
             Path: 作者缓存文件路径。
         """
-        return self._get_author_cache_dir() / f"{author}.json"
+        safe_author = self._validate_data_name(author, "作者名称")
+        return self._get_author_cache_dir() / f"{safe_author}.json"
 
     def _load_author_cache_payload(self, author: str) -> dict[str, Any] | None:
         """读取作者缓存文件。
@@ -1047,7 +1690,11 @@ class MarvelousSnailPluginBase(Star):
         Returns:
             dict[str, Any] | None: 作者缓存数据字典，如果文件不存在或格式无效则返回 None。
         """
-        author_file = self._get_author_cache_file(author)
+        try:
+            author_file = self._get_author_cache_file(author)
+        except ValueError as exc:
+            logger.warning(f"作者名称无效: {exc}")
+            return None
         if not author_file.exists():
             return None
 
@@ -1366,8 +2013,7 @@ class MarvelousSnailPluginBase(Star):
                 return False
         file_path = dir_path / file_name
         try:
-            with file_path.open("w", encoding="utf-8") as f:
-                json.dump(data, f, ensure_ascii=False, indent=4)
+            atomic_write_json(file_path, data)
             logger.info(f"已将数据写入 {file_path}")
             return True
         except Exception as e:

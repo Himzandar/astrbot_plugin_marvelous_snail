@@ -12,6 +12,7 @@ from astrbot.core.platform import MessageType as PlatformMessageType
 from astrbot.core.utils.session_waiter import SessionController, session_waiter
 
 from .code import parse_code
+from .utils import atomic_write_json
 
 if TYPE_CHECKING:
     # 避免循环导入导致的类型检查问题，实际运行时 StrategyFeatureBase 会被正确替换为 MarvelousSnailPluginBase
@@ -26,6 +27,7 @@ class StrategyFeatureMixin(StrategyFeatureBase):
     """最强蜗牛攻略功能类，提供了与攻略相关的核心功能实现，包括获取最新文章、发送更新通知、搜索和选择攻略等。"""
 
     STRATEGY_SYNC_WINDOW_SECONDS = 7 * 24 * 60 * 60
+    HTTP_TIMEOUT = aiohttp.ClientTimeout(total=30, connect=10)
 
     @staticmethod
     def _get_strategy_article_time(article: dict[str, Any]) -> int | None:
@@ -35,7 +37,7 @@ class StrategyFeatureMixin(StrategyFeatureBase):
         Returns:
             int | None: 返回文章的时间戳，如果无法获取则返回 None。
         """
-        article_time = article.get("update_time","") or article.get("create_time","")
+        article_time = article.get("update_time", "") or article.get("create_time", "")
         try:
             timestamp = int(article_time)
         except (TypeError, ValueError):
@@ -114,7 +116,11 @@ class StrategyFeatureMixin(StrategyFeatureBase):
             yield event.plain_result("❌ 目前仅支持搜索“最强蜗牛”公众号作者")
             return
 
-        async with aiohttp.ClientSession() as session:
+        size = max(1, min(int(size), 20))
+        sender_key = event.get_sender_id().replace("/", "_")
+        self.authors.pop(sender_key, None)
+        author_choices: dict[int, dict[str, str]] = {}
+        async with aiohttp.ClientSession(timeout=self.HTTP_TIMEOUT) as session:
             headers = {"X-Auth-Key": self.config.get("exporter_auth_key")}
             params = {"keyword": keyword, "size": size}
             try:
@@ -123,11 +129,30 @@ class StrategyFeatureMixin(StrategyFeatureBase):
                     headers=headers,
                     params=params,
                 ) as resp:
+                    if resp.status != 200:
+                        logger.warning(
+                            "搜索公众号作者失败，HTTP 状态码: %s", resp.status
+                        )
+                        yield event.plain_result(
+                            f"❌ 搜索失败：接口返回 HTTP {resp.status}"
+                        )
+                        return
                     try:
                         data = await resp.json()
+                        if not isinstance(data, dict):
+                            yield event.plain_result("❌ 搜索失败：接口响应格式异常")
+                            return
                         base_resp = data.get("base_resp")
-                        if base_resp and base_resp.get("err_msg") == "ok":
+                        if (
+                            isinstance(base_resp, dict)
+                            and base_resp.get("err_msg") == "ok"
+                        ):
                             data_list = data.get("list", [])
+                            if not isinstance(data_list, list):
+                                yield event.plain_result(
+                                    "❌ 搜索失败：作者列表格式异常"
+                                )
+                                return
                             index = 1
                             result = "搜索结果:"
                             authors = await self.get_kv_data("authors", {})
@@ -137,19 +162,32 @@ class StrategyFeatureMixin(StrategyFeatureBase):
                                 )
                                 authors = {}
                             for item in data_list:
-                                name = item.get("nickname")
-                                if name in authors.keys():  # type: ignore
+                                if not isinstance(item, dict):
                                     continue
-                                fakeid = item.get("fakeid")
+                                name = str(item.get("nickname", "")).strip()
+                                try:
+                                    self._validate_data_name(name, "作者名称")
+                                except ValueError:
+                                    logger.warning("忽略名称包含路径分隔符的作者")
+                                    continue
+                                if not name or name in authors:
+                                    continue
+                                fakeid = str(item.get("fakeid", "")).strip()
+                                if not fakeid:
+                                    continue
                                 result += f"\n{index}: {name}"
-                                self.authors[index] = {
+                                author_choices[index] = {
                                     "name": name,
                                     "fakeid": fakeid,
                                 }
                                 index += 1
                             if index == 1:
+                                self.authors.pop(sender_key, None)
                                 yield event.plain_result("❌ 未找到可添加的公众号作者")
                                 return
+                            # Search results are session state and must not leak
+                            # between different administrators.
+                            self.authors[sender_key] = author_choices
                             yield event.plain_result(result)
                         else:
                             err_msg = self._get_base_resp_error(data)
@@ -172,9 +210,17 @@ class StrategyFeatureMixin(StrategyFeatureBase):
             yield event.plain_result(error_text)
             return
         authors = await self.get_kv_data("authors", {})
+        if not isinstance(authors, dict):
+            yield event.plain_result("❌ 作者配置格式异常，请联系管理员检查")
+            return
+        sender_key = event.get_sender_id().replace("/", "_")
+        author_choices = self.authors.get(sender_key, {})
+        if not isinstance(author_choices, dict):
+            yield event.plain_result("❌ 作者搜索结果已失效，请重新搜索")
+            return
         try:
-            data = self.authors.get(int(index))
-        except ValueError:
+            data = author_choices.get(int(index))
+        except (TypeError, ValueError):
             yield event.plain_result("❌ 无效的索引，请输入数字")
             return
         if not data:
@@ -199,16 +245,21 @@ class StrategyFeatureMixin(StrategyFeatureBase):
             return
         authors = await self.get_kv_data("authors", {})
         articles = await self.get_kv_data("articles", {})
-        if name not in authors.keys():  # type: ignore
+        if not isinstance(authors, dict):
+            yield event.plain_result("❌ 作者配置格式异常，请联系管理员检查")
+            return
+        if not isinstance(articles, dict):
+            articles = {}
+        if name not in authors:
             yield event.plain_result(
                 "❌ 无效的名字，请先使用 zqwn_list 命令查看已保存的作者列表"
             )
             return
 
-        if name in articles.keys():  # type: ignore
-            del articles[name]  # type: ignore
+        if name in articles:
+            del articles[name]
             await self.put_kv_data("articles", articles)
-        del authors[name]  # type: ignore
+        del authors[name]
         await self.put_kv_data("authors", authors)
         yield event.plain_result(f"✅ 已删除作者: {name}")
 
@@ -223,7 +274,10 @@ class StrategyFeatureMixin(StrategyFeatureBase):
             yield event.plain_result(error_text)
             return
         authors = await self.get_kv_data("authors", {})
-        if not authors or len(authors) == 0:
+        if not isinstance(authors, dict):
+            yield event.plain_result("❌ 作者配置格式异常，请联系管理员检查")
+            return
+        if not authors:
             yield event.plain_result("❌ 请先使用 zqwn 命令搜索公众号作者")
             return
 
@@ -253,7 +307,7 @@ class StrategyFeatureMixin(StrategyFeatureBase):
         headers = {"X-Auth-Key": self.config.get("exporter_auth_key")}
         api_url = self.config.get("exporter_api_url")
 
-        async with aiohttp.ClientSession() as session:
+        async with aiohttp.ClientSession(timeout=self.HTTP_TIMEOUT) as session:
             while True:
                 reached_cutoff = False
                 params = {"fakeid": fakeid, "begin": begin, "size": page_size}
@@ -374,7 +428,7 @@ class StrategyFeatureMixin(StrategyFeatureBase):
         try:
             data = self.read_file("push_datas", "strategy.json")
             users = data.get("datas", []) if data else []
-            if not users or len(users) == 0:
+            if not isinstance(users, list) or not users:
                 logger.warning("未配置推送用户，无法发送私聊消息")
                 return
             for user in users:
@@ -404,6 +458,9 @@ class StrategyFeatureMixin(StrategyFeatureBase):
             yield event.plain_result("❌ 未配置推送用户")
             return
         push_list = data.get("datas", [])
+        if not isinstance(push_list, list):
+            yield event.plain_result("❌ 推送配置格式异常，请联系管理员检查")
+            return
         if push_list:
             msg = "\n".join(push_list)
             yield event.plain_result(f"✅ 当前推送用户: {msg}")
@@ -426,24 +483,32 @@ class StrategyFeatureMixin(StrategyFeatureBase):
         data = self.read_file("push_datas", "strategy.json")
         if not data:
             data = {"datas": []}
+        push_targets = data.get("datas", [])
+        if not isinstance(push_targets, list):
+            yield event.plain_result("❌ 攻略推送配置格式异常，请联系管理员检查")
+            return
         if enabled not in ["开启", "关闭"]:
             yield event.plain_result(
                 "❌ 参数错误，请使用：最强蜗牛 攻略推送 开启 或 最强蜗牛 攻略推送 关闭"
             )
             return
         if enabled == "开启":
-            if event.unified_msg_origin in data["datas"]:
+            if event.unified_msg_origin in push_targets:
                 yield event.plain_result(f"✅ {uid} 已经开启自动推送，无需重复设置")
                 return
-            data["datas"].append(event.unified_msg_origin)
-            yield event.plain_result(f"✅ {uid} 已开启自动推送")
+            push_targets.append(event.unified_msg_origin)
+            data["datas"] = push_targets
         else:
-            if event.unified_msg_origin not in data["datas"]:
+            if event.unified_msg_origin not in push_targets:
                 yield event.plain_result(f"✅ {uid} 已经关闭自动推送，无需重复设置")
                 return
-            data["datas"].remove(event.unified_msg_origin)
-            yield event.plain_result(f"✅ {uid} 已关闭自动推送")
-        self.write_file("push_datas", "strategy.json", data)
+            push_targets.remove(event.unified_msg_origin)
+            data["datas"] = push_targets
+        if not self.write_file("push_datas", "strategy.json", data):
+            yield event.plain_result("❌ 保存攻略推送配置失败，请查看日志")
+            return
+        action = "开启" if enabled == "开启" else "关闭"
+        yield event.plain_result(f"✅ {uid} 已{action}自动推送")
 
     async def save_strategy(
         self,
@@ -462,7 +527,7 @@ class StrategyFeatureMixin(StrategyFeatureBase):
         """
         plugin_data_path = self._get_author_cache_dir()
         plugin_data_path.mkdir(parents=True, exist_ok=True)
-        authors_file = plugin_data_path / f"{authors}.json"
+        authors_file = self._get_author_cache_file(authors)
 
         incoming_articles = []
         if isinstance(write_data, dict):
@@ -500,8 +565,7 @@ class StrategyFeatureMixin(StrategyFeatureBase):
             "articles": merged_articles,
         }
         try:
-            with authors_file.open("w", encoding="utf-8") as f:
-                json.dump(data, f, ensure_ascii=False, indent=4)
+            atomic_write_json(authors_file, data)
         except Exception as e:
             logger.error(f"写入 {authors}.json 失败: {e}")
 
@@ -727,8 +791,7 @@ class StrategyFeatureMixin(StrategyFeatureBase):
         data["code"] = codes
         data["num"] = len(codes)
         try:
-            with codes_file.open("w", encoding="utf-8") as f:
-                json.dump(data, f, ensure_ascii=False, indent=4)
+            atomic_write_json(codes_file, data)
             logger.info(f"已将密令写入 {codes_file}")
         except Exception as e:
             logger.error(f"写入密令失败: {e}")
@@ -755,8 +818,7 @@ class StrategyFeatureMixin(StrategyFeatureBase):
         urls.append(link)
         data["urls"] = urls
         try:
-            with code_error_file.open("w", encoding="utf-8") as f:
-                json.dump(data, f, ensure_ascii=False, indent=4)
+            atomic_write_json(code_error_file, data)
             logger.info(f"已将解析失败的链接写入 {code_error_file}")
         except Exception as e:
             logger.error(f"写入解析失败链接失败: {e}")

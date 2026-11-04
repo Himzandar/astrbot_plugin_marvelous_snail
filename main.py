@@ -5,11 +5,13 @@ from astrbot.api.event.filter import command, command_group
 from .core.account_feature import AccountFeatureMixin
 from .core.plugin_base import MarvelousSnailPluginBase
 from .core.strategy_feature import StrategyFeatureMixin
+from .core.web_binding import WebBindingMixin
 
 
 class MarvelousSnailPlugin(
     StrategyFeatureMixin,
     AccountFeatureMixin,
+    WebBindingMixin,
     MarvelousSnailPluginBase,
 ):
     """最强蜗牛插件，集成了账号管理和攻略查询功能，提供丰富的命令接口供用户使用。"""
@@ -146,6 +148,11 @@ class MarvelousSnailPlugin(
         """
         await self.batch_bind_accounts_impl(event)
 
+    @command("签到")
+    async def sign_current_user(self, event: AstrMessageEvent):
+        """领取当前 QQ 的网页绑定并执行首次签到。"""
+        await self.sign_current_user_impl(event)
+
     @command("查询绑定")
     async def query_account(self, event: AstrMessageEvent):
         """查询绑定账号实现函数，支持用户查询已绑定的最强蜗牛账号。
@@ -221,7 +228,7 @@ class MarvelousSnailPlugin(
         async for result in self.account_statistics_impl(event):
             yield result
 
-    #=============工具函数=============
+    # =============工具函数=============
     @llm_tool("send_code")
     async def send_code(self, event: AstrMessageEvent) -> None:
         """发送当前有效密令列表。仅在用户明确要求查看密令列表时才调用。

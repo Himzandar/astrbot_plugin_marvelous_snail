@@ -1,0 +1,640 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="light">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="light dark" />
+    <meta name="theme-color" content="#0f172a" />
+    <title>最强蜗牛管理</title>
+    <link rel="icon" href="data:," />
+    <link rel="stylesheet" href="./styles.css?v=1.16.3" />
+  </head>
+  <body>
+    <div class="ambient ambient-one" aria-hidden="true"></div>
+    <div class="ambient ambient-two" aria-hidden="true"></div>
+
+    <div class="page-shell">
+      <header class="page-header">
+        <div class="brand-lockup">
+          <div class="brand-mark" aria-hidden="true">蜗</div>
+          <div class="brand-copy">
+            <div class="eyebrow">MARVELOUS SNAIL · CONTROL ROOM</div>
+            <h1>最强蜗牛管理</h1>
+            <p>
+              签到服务与攻略服务独立管理
+              <span class="version-badge" id="versionBadge">读取中</span>
+            </p>
+          </div>
+        </div>
+
+        <div class="header-actions">
+          <div class="updated-block">
+            <span>数据时间</span>
+            <strong id="lastUpdated">尚未加载</strong>
+          </div>
+          <button class="button ghost" id="themeBtn" type="button" aria-label="切换主题">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M12 3a9 9 0 1 0 9 9 7 7 0 0 1-9-9Z"></path>
+            </svg>
+            <span id="themeLabel">跟随系统</span>
+          </button>
+          <button class="button ghost" id="refreshBtn" type="button">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M20 11a8.1 8.1 0 0 0-15.5-2M4 4v5h5"></path>
+              <path d="M4 13a8.1 8.1 0 0 0 15.5 2M20 20v-5h-5"></path>
+            </svg>
+            <span>刷新</span>
+          </button>
+        </div>
+      </header>
+
+      <div class="status-banner" id="statusBanner" role="alert" hidden>
+        <span class="status-banner-icon" aria-hidden="true">!</span>
+        <span id="statusBannerText">加载失败</span>
+        <button class="banner-close" id="dismissBannerBtn" type="button" aria-label="关闭提示">×</button>
+      </div>
+
+      <nav class="service-tabs" id="serviceTabs" role="tablist" aria-label="服务管理">
+        <button class="service-tab is-active" id="signinTab" type="button" role="tab" aria-selected="true" aria-controls="signinView" data-service="signin">
+          <span class="service-tab-mark" aria-hidden="true">签</span>
+          <span class="service-tab-copy">
+            <strong>签到服务</strong>
+            <small>账号绑定、网页申请与签到任务</small>
+          </span>
+          <span class="service-tab-count" id="signinTabCount">0</span>
+        </button>
+        <button class="service-tab" id="strategyTab" type="button" role="tab" aria-selected="false" aria-controls="strategyView" data-service="strategy" tabindex="-1">
+          <span class="service-tab-mark is-strategy" aria-hidden="true">攻</span>
+          <span class="service-tab-copy">
+            <strong>攻略服务</strong>
+            <small>作者缓存、推送目标与更新任务</small>
+          </span>
+          <span class="service-tab-count" id="strategyTabCount">0</span>
+        </button>
+      </nav>
+
+      <main>
+        <div class="service-view" id="signinView" role="tabpanel" aria-labelledby="signinTab" data-service-view="signin">
+        <section class="stats-grid" aria-label="签到服务数据概览">
+          <article class="stat-card">
+            <div class="stat-label-row">
+              <span class="stat-label">已绑定用户</span>
+              <span class="stat-symbol" aria-hidden="true">人</span>
+            </div>
+            <strong class="stat-value" id="statUsers">--</strong>
+            <span class="stat-hint" id="statUsersHint">等待数据</span>
+          </article>
+
+          <article class="stat-card">
+            <div class="stat-label-row">
+              <span class="stat-label">蜗牛账号</span>
+              <span class="stat-symbol" aria-hidden="true">号</span>
+            </div>
+            <strong class="stat-value" id="statAccounts">--</strong>
+            <span class="stat-hint">跨用户去重后的账号数</span>
+          </article>
+
+          <article class="stat-card">
+            <div class="stat-label-row">
+              <span class="stat-label">游戏角色</span>
+              <span class="stat-symbol" aria-hidden="true">角</span>
+            </div>
+            <strong class="stat-value" id="statRoles">--</strong>
+            <span class="stat-hint" id="statRolesHint">等待数据</span>
+          </article>
+
+          <article class="stat-card stat-rate-card">
+            <div class="stat-label-row">
+              <span class="stat-label">签到成功率</span>
+              <span class="stat-symbol" aria-hidden="true">签</span>
+            </div>
+            <strong class="stat-value" id="statRate">--</strong>
+            <div class="rate-track" aria-hidden="true"><span id="rateBar"></span></div>
+            <span class="stat-hint" id="statRateHint">尚未产生签到记录</span>
+          </article>
+
+          <article class="stat-card stat-attention">
+            <div class="stat-label-row">
+              <span class="stat-label">需要关注</span>
+              <span class="stat-symbol" aria-hidden="true">!</span>
+            </div>
+            <strong class="stat-value" id="statAttention">--</strong>
+            <span class="stat-hint" id="statAttentionHint">失败与数据异常</span>
+          </article>
+
+          <article class="stat-card">
+            <div class="stat-label-row">
+              <span class="stat-label">网页待处理</span>
+              <span class="stat-symbol" aria-hidden="true">网</span>
+            </div>
+            <strong class="stat-value" id="statPending">--</strong>
+            <span class="stat-hint" id="statPendingHint">等待同步的绑定申请</span>
+          </article>
+        </section>
+
+        <section class="signin-control-grid" aria-label="签到策略与通知">
+          <section class="panel signin-control-panel">
+            <header class="panel-header compact-header">
+              <div>
+                <span class="panel-kicker">GIFT POLICY</span>
+                <h2>礼包领取</h2>
+                <p>统一控制自动签到、手动签到与网页首次签到</p>
+              </div>
+              <span class="health-pill" id="signinGiftPill"><i aria-hidden="true"></i>读取中</span>
+            </header>
+            <form class="settings-form" id="signinGiftForm">
+              <label class="form-field" for="signinGiftMode">
+                <span>领取类型</span>
+                <select id="signinGiftMode" name="claim_mode">
+                  <option value="all">全部可领取礼包</option>
+                  <option value="none">不自动领取</option>
+                </select>
+                <small>选择“全部”后，各签到入口会在执行时领取当前可领的活动礼包。</small>
+              </label>
+              <p class="form-hint" id="signinGiftHint" role="alert" hidden></p>
+              <div class="settings-actions">
+                <button class="button primary compact-button" id="saveSigninGiftBtn" type="submit">保存礼包策略</button>
+              </div>
+            </form>
+            <p class="panel-footnote">每日定时签到仍按原计划执行；此设置只决定是否领取礼包。</p>
+          </section>
+
+          <section class="panel signin-control-panel signin-notification-panel">
+            <header class="panel-header compact-header">
+              <div>
+                <span class="panel-kicker">SIGN-IN NOTICES</span>
+                <h2>签到通知</h2>
+                <p>控制定时签到汇总与推送目标</p>
+              </div>
+              <div class="panel-tools">
+                <span class="count-badge" id="signinTargetCount">0</span>
+                <button class="button ghost compact-button" id="addSigninTargetBtn" type="button">新增目标</button>
+              </div>
+            </header>
+            <form class="settings-form" id="signinNotificationForm">
+              <div class="setting-toggle-list">
+                <label class="setting-toggle" for="signinNotifyEnabled">
+                  <span class="setting-toggle-copy">
+                    <strong>启用签到汇总通知</strong>
+                    <small>关闭后仍正常签到，只是不发送汇总消息。</small>
+                  </span>
+                  <input id="signinNotifyEnabled" type="checkbox" />
+                </label>
+                <label class="setting-toggle" for="signinNotifyImage">
+                  <span class="setting-toggle-copy">
+                    <strong>附带当天奖励图片</strong>
+                    <small>发送汇总时附加插件内置的星期奖励配图。</small>
+                  </span>
+                  <input id="signinNotifyImage" type="checkbox" />
+                </label>
+              </div>
+              <label class="form-field" for="signinDetailMode">
+                <span>汇总明细</span>
+                <select id="signinDetailMode" name="detail_mode">
+                  <option value="issues_overview">异常 + 用户概览</option>
+                  <option value="issues_only">仅异常</option>
+                  <option value="full">完整角色明细</option>
+                </select>
+                <small>异常优先展示；完整明细会自动分页，不会合并为单条超长消息。</small>
+              </label>
+              <p class="form-hint" id="signinNotificationHint" role="alert" hidden></p>
+              <div class="settings-actions">
+                <button class="button primary compact-button" id="saveSigninNotificationBtn" type="submit">保存通知设置</button>
+              </div>
+            </form>
+            <div class="subsection-heading signin-target-heading">
+              <h3>通知目标</h3>
+              <span>群聊或私聊</span>
+            </div>
+            <div class="strategy-push-list signin-target-list" id="signinTargetList" aria-live="polite">
+              <div class="empty-inline">正在读取签到通知目标…</div>
+            </div>
+            <p class="panel-footnote">目标保存在原有 <code>push_datas/sign.json</code>，旧群聊配置继续有效。</p>
+          </section>
+        </section>
+
+        <section class="content-grid">
+          <section class="panel users-panel">
+            <header class="panel-header">
+              <div>
+                <span class="panel-kicker">BINDINGS</span>
+                <h2>用户绑定</h2>
+                <p id="userSummary">正在读取用户数据…</p>
+              </div>
+              <div class="panel-tools">
+                <span class="live-pill" id="mutationPill"><i aria-hidden="true"></i>读取中</span>
+                <button class="button ghost compact-button" id="syncBtn" type="button">
+                  <svg viewBox="0 0 24 24" aria-hidden="true">
+                    <path d="M12 3v12"></path>
+                    <path d="m7 10 5 5 5-5"></path>
+                    <path d="M5 21h14"></path>
+                  </svg>
+                  <span>同步网页申请</span>
+                </button>
+                <button class="button primary compact-button" id="addBindingBtn" type="button">
+                  <svg viewBox="0 0 24 24" aria-hidden="true">
+                    <path d="M12 5v14"></path>
+                    <path d="M5 12h14"></path>
+                  </svg>
+                  <span>新增官服绑定</span>
+                </button>
+              </div>
+            </header>
+
+            <div class="toolbar">
+              <label class="search-field" for="searchInput">
+                <svg viewBox="0 0 24 24" aria-hidden="true">
+                  <circle cx="11" cy="11" r="7"></circle>
+                  <path d="m20 20-4-4"></path>
+                </svg>
+                <input id="searchInput" type="search" placeholder="搜索 QQ、状态或数量" autocomplete="off" />
+                <kbd>/</kbd>
+              </label>
+
+              <div class="filter-pills" id="filterPills" role="group" aria-label="按状态筛选">
+                <button type="button" class="filter-pill is-active" data-filter="all">全部 <span id="countAll">0</span></button>
+                <button type="button" class="filter-pill" data-filter="healthy">正常 <span id="countHealthy">0</span></button>
+                <button type="button" class="filter-pill" data-filter="attention">需关注 <span id="countAttention">0</span></button>
+                <button type="button" class="filter-pill" data-filter="pending">处理中 <span id="countPending">0</span></button>
+                <button type="button" class="filter-pill" data-filter="unknown">未签到 <span id="countUnknown">0</span></button>
+              </div>
+            </div>
+
+            <div class="user-table">
+              <div class="user-table-head" aria-hidden="true">
+                <span>用户</span>
+                <span>绑定</span>
+                <span>签到</span>
+                <span>状态</span>
+                <span>最近更新</span>
+                <span></span>
+              </div>
+              <div class="user-list" id="userList" aria-live="polite">
+                <div class="skeleton-row"><span></span><span></span><span></span><span></span><span></span></div>
+                <div class="skeleton-row"><span></span><span></span><span></span><span></span><span></span></div>
+                <div class="skeleton-row"><span></span><span></span><span></span><span></span><span></span></div>
+                <div class="skeleton-row"><span></span><span></span><span></span><span></span><span></span></div>
+              </div>
+            </div>
+          </section>
+
+          <aside class="side-column">
+            <section class="panel pending-panel">
+              <header class="panel-header compact-header">
+                <div>
+                  <span class="panel-kicker">WEB REQUESTS</span>
+                  <h2>网页申请</h2>
+                  <p id="pendingSummary">尚未读取队列</p>
+                </div>
+                <span class="count-badge" id="pendingCount">0</span>
+              </header>
+
+              <div class="pending-metrics">
+                <div><strong id="pendingRoles">--</strong><span>待处理角色</span></div>
+                <div><strong id="pendingDue">--</strong><span>已到处理时间</span></div>
+                <div><strong id="pendingExpired">--</strong><span>已过期</span></div>
+              </div>
+
+              <div class="stack-list compact-list" id="pendingList">
+                <div class="empty-inline">正在读取网页暂存队列…</div>
+              </div>
+              <p class="panel-footnote">插件每 5 秒自动拉取并处理即时申请；也可使用右上角按钮立即同步。</p>
+            </section>
+
+            <section class="panel runtime-panel">
+              <header class="panel-header compact-header">
+                <div>
+                  <span class="panel-kicker">RUNTIME</span>
+                  <h2>运行状态</h2>
+                  <p>调度器与功能配置检查</p>
+                </div>
+                <span class="health-pill" id="schedulerPill"><i aria-hidden="true"></i>读取中</span>
+              </header>
+
+              <div class="check-list" id="runtimeChecks"></div>
+
+              <div class="subsection-heading">
+                <h3>定时任务</h3>
+                <span id="jobCount">0 项</span>
+              </div>
+              <div class="job-list" id="jobList">
+                <div class="empty-inline">正在读取定时任务…</div>
+              </div>
+
+              <div class="progress-card" id="autoSignProgress" hidden></div>
+            </section>
+          </aside>
+        </section>
+        </div>
+
+        <div class="service-view" id="strategyView" role="tabpanel" aria-labelledby="strategyTab" data-service-view="strategy" hidden>
+          <section class="stats-grid strategy-stats-grid" aria-label="攻略服务数据概览">
+            <article class="stat-card">
+              <div class="stat-label-row">
+                <span class="stat-label">已保存作者</span>
+                <span class="stat-symbol" aria-hidden="true">作</span>
+              </div>
+              <strong class="stat-value" id="strategyStatAuthors">--</strong>
+              <span class="stat-hint" id="strategyStatAuthorsHint">等待数据</span>
+            </article>
+
+            <article class="stat-card">
+              <div class="stat-label-row">
+                <span class="stat-label">缓存文章</span>
+                <span class="stat-symbol" aria-hidden="true">文</span>
+              </div>
+              <strong class="stat-value" id="strategyStatArticles">--</strong>
+              <span class="stat-hint" id="strategyStatArticlesHint">本地可检索文章数</span>
+            </article>
+
+            <article class="stat-card">
+              <div class="stat-label-row">
+                <span class="stat-label">推送目标</span>
+                <span class="stat-symbol" aria-hidden="true">推</span>
+              </div>
+              <strong class="stat-value" id="strategyStatTargets">--</strong>
+              <span class="stat-hint" id="strategyStatTargetsHint">攻略更新推送会话</span>
+            </article>
+
+            <article class="stat-card">
+              <div class="stat-label-row">
+                <span class="stat-label">更新任务</span>
+                <span class="stat-symbol" aria-hidden="true">更</span>
+              </div>
+              <strong class="stat-value stat-value-text" id="strategyStatJob">--</strong>
+              <span class="stat-hint" id="strategyStatJobHint">等待读取任务状态</span>
+            </article>
+          </section>
+
+          <section class="content-grid strategy-content-grid">
+            <section class="panel strategy-panel">
+              <header class="panel-header">
+                <div>
+                  <span class="panel-kicker">STRATEGY AUTHORS</span>
+                  <h2>作者与文章缓存</h2>
+                  <p id="strategyAuthorSummary">正在读取攻略作者缓存…</p>
+                </div>
+                <div class="panel-tools">
+                  <span class="count-badge" id="strategyAuthorCount">0</span>
+                  <button class="button primary compact-button" id="addStrategyAuthorBtn" type="button">
+                    <svg viewBox="0 0 24 24" aria-hidden="true">
+                      <path d="M12 5v14"></path>
+                      <path d="M5 12h14"></path>
+                    </svg>
+                    <span>新增作者</span>
+                  </button>
+                </div>
+              </header>
+
+              <div class="strategy-note">
+                作者名称、fakeid 与本地文章缓存可在此维护；fakeid 不会回显，编辑时留空保持不变。攻略服务地址与认证密钥仍在 AstrBot 插件配置中设置。
+              </div>
+
+              <div class="strategy-author-list" id="strategyAuthorList" aria-live="polite">
+                <div class="skeleton-row"><span></span><span></span><span></span><span></span></div>
+                <div class="skeleton-row"><span></span><span></span><span></span><span></span></div>
+              </div>
+            </section>
+
+            <aside class="side-column strategy-side-column">
+              <section class="panel runtime-panel">
+                <header class="panel-header compact-header">
+                  <div>
+                    <span class="panel-kicker">STRATEGY RUNTIME</span>
+                    <h2>攻略服务状态</h2>
+                    <p>配置与更新任务检查</p>
+                  </div>
+                  <span class="health-pill" id="strategyHealthPill"><i aria-hidden="true"></i>读取中</span>
+                </header>
+
+                <div class="check-list" id="strategyChecks"></div>
+
+                <div class="subsection-heading">
+                  <h3>更新任务</h3>
+                  <span id="strategyJobCount">0 项</span>
+                </div>
+                <div class="job-list" id="strategyJobList">
+                  <div class="empty-inline">正在读取攻略更新任务…</div>
+                </div>
+              </section>
+
+              <section class="panel push-panel">
+                <header class="panel-header compact-header">
+                  <div>
+                    <span class="panel-kicker">PUSH TARGETS</span>
+                    <h2>推送目标</h2>
+                    <p id="strategyPushSummary">尚未读取推送目标</p>
+                  </div>
+                  <div class="panel-tools">
+                    <span class="count-badge" id="strategyPushCount">0</span>
+                    <button class="button ghost compact-button" id="addStrategyPushBtn" type="button">
+                      <svg viewBox="0 0 24 24" aria-hidden="true">
+                        <path d="M12 5v14"></path>
+                        <path d="M5 12h14"></path>
+                      </svg>
+                      <span>新增目标</span>
+                    </button>
+                  </div>
+                </header>
+                <div class="strategy-push-list compact-list" id="strategyPushList">
+                  <div class="empty-inline">正在读取攻略推送目标…</div>
+                </div>
+              </section>
+            </aside>
+          </section>
+        </div>
+      </main>
+
+      <footer class="page-footer">
+        <span>敏感信息已脱敏展示</span>
+        <span>绑定操作仅对已登录的 AstrBot 管理员开放，请求头与密钥不会发送到管理页</span>
+      </footer>
+    </div>
+
+    <div class="drawer-backdrop" id="drawerBackdrop" hidden></div>
+    <aside class="user-drawer" id="userDrawer" role="dialog" aria-modal="true" aria-labelledby="drawerTitle" hidden>
+      <header class="drawer-header">
+        <div>
+          <span class="panel-kicker">USER DETAIL</span>
+          <h2 id="drawerTitle">用户详情</h2>
+          <p id="drawerSubtitle">正在读取…</p>
+        </div>
+        <button class="drawer-close" id="drawerCloseBtn" type="button" aria-label="关闭用户详情">×</button>
+      </header>
+      <div class="drawer-body" id="drawerBody"></div>
+    </aside>
+
+    <div class="dialog-backdrop" id="bindingBackdrop" hidden></div>
+    <section class="binding-dialog" id="bindingDialog" role="dialog" aria-modal="true" aria-labelledby="bindingDialogTitle" hidden>
+      <header class="dialog-header">
+        <div>
+          <span class="panel-kicker">BINDING EDITOR</span>
+          <h2 id="bindingDialogTitle">新增官服绑定</h2>
+          <p id="bindingDialogSubtitle">填写官服账号与角色信息后保存；渠道服请通过网页提交</p>
+        </div>
+        <button class="drawer-close" id="bindingCloseBtn" type="button" aria-label="关闭绑定表单">×</button>
+      </header>
+      <form class="binding-form" id="bindingForm" novalidate>
+        <div class="form-grid">
+          <label class="form-field" for="bindingQQ">
+            <span>QQ 号 <em>*</em></span>
+            <input id="bindingQQ" name="qq" type="text" inputmode="numeric" autocomplete="off" maxlength="12" placeholder="5-12 位数字" required />
+          </label>
+          <label class="form-field" for="bindingGame">
+            <span>游戏区服 <em>*</em></span>
+            <select id="bindingGame" name="game_id">
+              <option value="39">官服</option>
+              <option value="26">光子服</option>
+            </select>
+          </label>
+          <label class="form-field" for="bindingAccount">
+            <span>手机号 <em id="bindingAccountRequired">*</em></span>
+            <input id="bindingAccount" name="account" type="text" inputmode="numeric" autocomplete="off" maxlength="20" placeholder="6-20 位数字" />
+            <small id="bindingAccountHint">用于查询角色，保存时加密</small>
+          </label>
+          <label class="form-field" for="bindingRole">
+            <span>角色 ID <em id="bindingRoleRequired">*</em></span>
+            <input id="bindingRole" name="role_id" type="text" autocomplete="off" maxlength="128" placeholder="不含空白字符" />
+            <small>修改身份时需与手机号同时填写</small>
+          </label>
+          <label class="form-field form-field-wide" for="bindingInfo">
+            <span>角色备注</span>
+            <input id="bindingInfo" name="info" type="text" autocomplete="off" maxlength="200" placeholder="留空时自动生成" />
+            <small id="bindingInfoHint">仅用于管理页辨识，不影响签到</small>
+          </label>
+        </div>
+        <p class="form-hint" id="bindingFormHint" role="alert" hidden></p>
+        <div class="form-actions">
+          <button class="button ghost" id="bindingCancelBtn" type="button">取消</button>
+          <button class="button primary" id="bindingSubmitBtn" type="submit">保存绑定</button>
+        </div>
+      </form>
+    </section>
+
+    <div class="dialog-backdrop" id="strategyBackdrop" hidden></div>
+    <section class="binding-dialog" id="strategyDialog" role="dialog" aria-modal="true" aria-labelledby="strategyDialogTitle" hidden>
+      <header class="dialog-header">
+        <div>
+          <span class="panel-kicker">STRATEGY EDITOR</span>
+          <h2 id="strategyDialogTitle">新增攻略作者</h2>
+          <p id="strategyDialogSubtitle">填写公众号作者信息后保存</p>
+        </div>
+        <button class="drawer-close" id="strategyCloseBtn" type="button" aria-label="关闭攻略编辑表单">×</button>
+      </header>
+      <form class="binding-form" id="strategyForm" novalidate>
+        <div class="form-grid" id="strategyAuthorFields">
+          <label class="form-field" for="strategyAuthorName">
+            <span>作者名称 <em>*</em></span>
+            <input id="strategyAuthorName" name="author_name" type="text" autocomplete="off" maxlength="40" placeholder="例如：最强蜗牛" required />
+            <small>支持中文、字母、数字与空格，不能包含路径分隔符</small>
+          </label>
+          <label class="form-field" for="strategyAuthorFakeid">
+            <span>作者 fakeid <em id="strategyFakeidRequired">*</em></span>
+            <input id="strategyAuthorFakeid" name="fakeid" type="password" autocomplete="new-password" maxlength="128" placeholder="公众号唯一标识" />
+            <small id="strategyFakeidHint">仅写入插件 KV，不会在页面或快照中回显</small>
+          </label>
+        </div>
+
+        <div class="form-grid" id="strategyPushFields" hidden>
+          <label class="form-field" for="strategyPushPlatform">
+            <span>平台标识 <em>*</em></span>
+            <input id="strategyPushPlatform" name="platform" type="text" autocomplete="off" maxlength="64" placeholder="例如：QQ" />
+            <small>对应 AstrBot 消息来源的平台 ID</small>
+          </label>
+          <label class="form-field" for="strategyPushKind">
+            <span>会话类型 <em>*</em></span>
+            <select id="strategyPushKind" name="kind">
+              <option value="group">群聊</option>
+              <option value="private">私聊</option>
+            </select>
+          </label>
+          <label class="form-field form-field-wide" for="strategyPushTarget">
+            <span>群号或用户号 <em>*</em></span>
+            <input id="strategyPushTarget" name="target" type="text" autocomplete="off" maxlength="128" placeholder="例如：123456789" />
+            <small>保存后会组合为“平台:会话类型:标识”，不能包含空白或冒号</small>
+          </label>
+        </div>
+
+        <p class="form-hint" id="strategyFormHint" role="alert" hidden></p>
+        <div class="form-actions">
+          <button class="button ghost" id="strategyCancelBtn" type="button">取消</button>
+          <button class="button primary" id="strategySubmitBtn" type="submit">保存作者</button>
+        </div>
+      </form>
+    </section>
+
+    <div class="dialog-backdrop" id="signinPushBackdrop" hidden></div>
+    <section class="binding-dialog" id="signinPushDialog" role="dialog" aria-modal="true" aria-labelledby="signinPushDialogTitle" hidden>
+      <header class="dialog-header">
+        <div>
+          <span class="panel-kicker">SIGN-IN NOTICE</span>
+          <h2 id="signinPushDialogTitle">新增通知目标</h2>
+          <p id="signinPushDialogSubtitle">填写接收签到汇总的会话信息</p>
+        </div>
+        <button class="drawer-close" id="signinPushCloseBtn" type="button" aria-label="关闭签到通知目标表单">×</button>
+      </header>
+      <form class="binding-form" id="signinPushForm" novalidate>
+        <div class="form-grid">
+          <label class="form-field" for="signinPushPlatform">
+            <span>平台标识 <em>*</em></span>
+            <input id="signinPushPlatform" name="platform" type="text" autocomplete="off" maxlength="64" placeholder="例如：QQ" required />
+            <small>对应 AstrBot 消息来源的平台 ID</small>
+          </label>
+          <label class="form-field" for="signinPushKind">
+            <span>会话类型 <em>*</em></span>
+            <select id="signinPushKind" name="kind">
+              <option value="group">群聊</option>
+              <option value="private">私聊</option>
+            </select>
+          </label>
+          <label class="form-field form-field-wide" for="signinPushTarget">
+            <span>群号或用户号 <em>*</em></span>
+            <input id="signinPushTarget" name="target" type="text" autocomplete="off" maxlength="128" placeholder="例如：123456789" required />
+            <small>保存后会组合为“平台:会话类型:标识”，不能包含空白或冒号</small>
+          </label>
+        </div>
+        <p class="form-hint" id="signinPushHint" role="alert" hidden></p>
+        <div class="form-actions">
+          <button class="button ghost" id="signinPushCancelBtn" type="button">取消</button>
+          <button class="button primary" id="signinPushSubmitBtn" type="submit">保存目标</button>
+        </div>
+      </form>
+    </section>
+
+    <div class="dialog-backdrop" id="articlesBackdrop" hidden></div>
+    <section class="binding-dialog articles-dialog" id="articlesDialog" role="dialog" aria-modal="true" aria-labelledby="articlesDialogTitle" hidden>
+      <header class="dialog-header">
+        <div>
+          <span class="panel-kicker">ARTICLE CACHE</span>
+          <h2 id="articlesDialogTitle">作者文章</h2>
+          <p id="articlesDialogSubtitle">正在读取本地文章缓存…</p>
+        </div>
+        <button class="drawer-close" id="articlesCloseBtn" type="button" aria-label="关闭文章列表">×</button>
+      </header>
+      <div class="articles-body">
+        <div class="articles-meta" id="articlesMeta"></div>
+        <div class="articles-list" id="articlesList" aria-live="polite"></div>
+      </div>
+      <div class="articles-actions">
+        <button class="button ghost" id="articlesCloseFooterBtn" type="button">关闭</button>
+      </div>
+    </section>
+
+    <div class="dialog-backdrop confirm-backdrop" id="confirmBackdrop" hidden></div>
+    <section class="confirm-dialog" id="confirmDialog" role="alertdialog" aria-modal="true" aria-labelledby="confirmTitle" aria-describedby="confirmMessage" hidden>
+      <span class="confirm-icon" aria-hidden="true">!</span>
+      <div class="confirm-copy">
+        <h2 id="confirmTitle">确认删除</h2>
+        <p id="confirmMessage">此操作不可撤销。</p>
+      </div>
+      <div class="confirm-actions">
+        <button class="button ghost" id="confirmCancelBtn" type="button">取消</button>
+        <button class="button danger" id="confirmOkBtn" type="button">确认删除</button>
+      </div>
+    </section>
+
+    <div class="toast-layer" id="toastLayer" aria-live="polite" aria-atomic="true"></div>
+    <script type="module" src="./app.js?v=1.16.3"></script>
+  </body>
+</html>
+

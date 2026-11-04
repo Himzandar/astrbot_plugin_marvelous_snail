@@ -1,6 +1,8 @@
 import aiohttp
 from lxml import etree  # type: ignore
 
+REQUEST_TIMEOUT = aiohttp.ClientTimeout(total=30, connect=10)
+
 
 async def parse_code(exporter_api_url, url: str) -> dict:
     """解析密令
@@ -17,13 +19,16 @@ async def parse_code(exporter_api_url, url: str) -> dict:
     """
     ret = {"msg": "", "code": "", "share": False}
     # 获取url的html
-    async with aiohttp.ClientSession() as session:
+    async with aiohttp.ClientSession(timeout=REQUEST_TIMEOUT) as session:
         params = {"url": url, "format": "html"}
         try:
             async with session.get(
                 f"{exporter_api_url}/api/public/v1/download",
                 params=params,
             ) as resp:
+                if resp.status != 200:
+                    ret["msg"] = f"解析密令接口返回 HTTP {resp.status}"
+                    return ret
                 try:
                     data = await resp.text()
                     tree = etree.HTML(data)

@@ -1,8 +1,13 @@
 # utils.py
 import base64
 import json
+import os
+import tempfile
 import urllib.parse
 from datetime import datetime
+from functools import lru_cache
+from pathlib import Path
+from typing import Any
 
 from cryptography.fernet import Fernet
 from cryptography.hazmat.primitives import hashes
@@ -13,6 +18,50 @@ from astrbot.api.event import AstrMessageEvent
 from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event import (
     AiocqhttpMessageEvent,
 )
+
+
+def atomic_write_json(
+    path: str | Path,
+    payload: Any,
+    *,
+    indent: int | None = 4,
+    mode: int | None = None,
+) -> None:
+    """Write JSON through a unique temporary file and atomically replace the target.
+
+    A direct ``open("w")`` truncates the original file before serialization finishes.
+    That makes a process crash or a concurrent reader observe incomplete user data.
+    The temporary file is created in the target directory so ``os.replace`` remains
+    atomic on the same filesystem.
+
+    Args:
+        path: Destination JSON file.
+        payload: JSON-serializable payload.
+        indent: JSON indentation, or ``None`` for compact output.
+        mode: Optional POSIX permissions for the final file.
+    """
+    target = Path(path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    file_descriptor, temp_name = tempfile.mkstemp(
+        prefix=f".{target.name}.",
+        suffix=".tmp",
+        dir=target.parent,
+    )
+    temp_path = Path(temp_name)
+    descriptor_open = True
+    try:
+        with os.fdopen(file_descriptor, "w", encoding="utf-8") as handle:
+            descriptor_open = False
+            json.dump(payload, handle, ensure_ascii=False, indent=indent)
+            handle.flush()
+            os.fsync(handle.fileno())
+        if mode is not None:
+            temp_path.chmod(mode)
+        os.replace(temp_path, target)
+    finally:
+        if descriptor_open:
+            os.close(file_descriptor)
+        temp_path.unlink(missing_ok=True)
 
 
 def cron_to_human(cron: str) -> str:
@@ -122,8 +171,22 @@ async def send_msg(event: AstrMessageEvent, msg: str) -> int | None:
 # ====================== AES 加密工具（个保法合规必备） ======================
 
 
-def get_fernet(secret_key: str):
-    """生成 Fernet 对象用于加密和解密
+@lru_cache(maxsize=8)
+def _derive_fernet(secret_key: str) -> Fernet:
+    """Derive and cache a Fernet instance for a normalized secret key."""
+    kdf = PBKDF2HMAC(
+        algorithm=hashes.SHA256(),
+        length=32,
+        salt=b"Himzandar",
+        iterations=100000,
+    )
+    key = base64.urlsafe_b64encode(kdf.derive(secret_key.encode("utf-8")))
+    return Fernet(key)
+
+
+def get_fernet(secret_key: str) -> Fernet:
+    """生成并缓存 Fernet 对象用于加密和解密。
+
     Args:
         secret_key: 配置中填写的加密密钥
     Returns:
@@ -131,14 +194,7 @@ def get_fernet(secret_key: str):
     """
     if not isinstance(secret_key, str) or not secret_key.strip():
         raise ValueError("未配置 encryption_secret_key，无法执行加解密")
-    kdf = PBKDF2HMAC(
-        algorithm=hashes.SHA256(),
-        length=32,
-        salt=b"Himzandar",
-        iterations=100000,
-    )
-    key = base64.urlsafe_b64encode(kdf.derive(secret_key.strip().encode("utf-8")))
-    return Fernet(key)
+    return _derive_fernet(secret_key.strip())
 
 
 def encrypt_data(text: str, secret_key: str) -> str:

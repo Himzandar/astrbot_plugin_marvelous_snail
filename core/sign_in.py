@@ -1,4 +1,6 @@
 # sign_in.py
+import urllib.parse
+
 import aiohttp
 
 from astrbot.api import logger
@@ -6,6 +8,18 @@ from astrbot.api import logger
 api = "https://api.qingcigame.com"
 app_id = "39"
 REQUEST_TIMEOUT = aiohttp.ClientTimeout(total=30)
+CHANNEL_BIND_URL = f"{api}/game/binds/channel"
+CHANNEL_SIGN_SUPPORTED = True
+CHANNEL_SIGN_PENDING_MESSAGE = "等待渠道服签到"
+CHANNEL_GAME_ID = "39"
+CHANNEL_PLATFORM_NAMES = {
+    "bilibili": "B站",
+    "huawei": "华为",
+    "mi": "小米",
+    "oppo": "OPPO",
+    "vivo": "vivo",
+    "honor": "荣耀",
+}
 
 
 async def _request_json(method: str, url: str, **kwargs):
@@ -95,6 +109,37 @@ async def binds_account(headers, payload):
     data = await _request_json("post", url, headers=headers, data=payload)
     if not isinstance(data, dict):
         return {"code": -1, "message": "绑定请求失败"}
+    return data
+
+
+async def binds_channel_account(
+    headers,
+    role_id: str,
+    role_name: str,
+    platform: str,
+):
+    """执行渠道服角色绑定请求。
+
+    Args:
+        headers: 与普通签到共用的请求头。
+        role_id: 渠道服角色 ID。
+        role_name: 渠道服角色昵称。
+        platform: 渠道编码。
+    Returns:
+        绑定结果的 JSON 数据。
+    """
+    page_id = "1"
+    params = {
+        "app_id": app_id,
+        "page_id": page_id,
+        "role_id": role_id,
+        "role_name": role_name,
+        "platform": platform,
+    }
+    payload = urllib.parse.urlencode(params, quote_via=urllib.parse.quote).encode()
+    data = await _request_json("post", CHANNEL_BIND_URL, headers=headers, data=payload)
+    if not isinstance(data, dict):
+        return {"code": -1, "message": "渠道服绑定请求失败"}
     return data
 
 

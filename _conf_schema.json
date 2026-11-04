@@ -22,5 +22,23 @@
         "type": "string",
         "hint": "用于加密本地保存的手机号和角色ID。首次使用请填写一段固定随机字符串；修改后旧绑定数据将无法解密。",
         "default": ""
+    },
+    "web_portal_url": {
+        "description": "网页绑定服务地址",
+        "type": "string",
+        "hint": "例如 https://xiyujing.com/snail，末尾不要带斜杠",
+        "default": ""
+    },
+    "web_portal_sync_token": {
+        "description": "网页绑定同步令牌",
+        "type": "string",
+        "hint": "必须与门户服务端 SNAIL_PORTAL_SYNC_TOKEN 完全一致",
+        "default": ""
+    },
+    "web_auto_sign_delay_seconds": {
+        "description": "旧版网页自动签到延迟秒数",
+        "type": "int",
+        "hint": "仅用于兼容旧版 auto 暂存记录；新版即时任务提交后立即执行，不受此值影响。范围 60～1500 秒，默认 300 秒",
+        "default": 300
     }
 }
