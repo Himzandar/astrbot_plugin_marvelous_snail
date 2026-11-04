@@ -1955,36 +1955,6 @@ class MarvelousSnailPluginBase(Star):
         lines.append("回复 退出 或 取消 可结束当前流程。")
         return "\n".join(lines).strip()
 
-    def _get_latest_strategy_article(
-        self, articles: list[dict[str, Any]]
-    ) -> dict[str, Any] | None:
-        """从文章列表中选出最新且未删除的文章，用于更新通知。
-        Args:
-            articles: 文章列表。
-        Returns:
-            dict[str, Any] | None: 最新且未删除的文章，如果没有可用文章则返回 None。
-        """
-        available_articles = [
-            article
-            for article in articles
-            if isinstance(article, dict)
-            and article.get("is_deleted") is not True
-            and article.get("author_name") != "广告"
-        ]
-        if not available_articles:
-            return None
-
-        available_articles.sort(
-            key=lambda item: (
-                item.get("update_time")
-                or item.get("create_time")
-                or item.get("aid")
-                or 0
-            ),
-            reverse=True,
-        )
-        return available_articles[0]
-
     def _render_user_status_markdown(
         self, user_id: str, users: list[dict[str, Any]]
     ) -> str:

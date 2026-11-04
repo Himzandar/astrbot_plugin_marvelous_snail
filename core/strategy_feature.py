@@ -28,7 +28,25 @@ class StrategyFeatureMixin(StrategyFeatureBase):
     """最强蜗牛攻略功能类，提供了与攻略相关的核心功能实现，包括获取最新文章、发送更新通知、搜索和选择攻略等。"""
 
     STRATEGY_SYNC_WINDOW_SECONDS = 7 * 24 * 60 * 60
+    STRATEGY_MAX_PAGES = 10
+    STRATEGY_MAX_ARTICLES = 200
+    STRATEGY_PUSHED_AIDS_KEEP = 50
     HTTP_TIMEOUT = aiohttp.ClientTimeout(total=30, connect=10)
+
+    @staticmethod
+    def _get_article_key(article: dict[str, Any]) -> str:
+        """返回文章去重键，优先使用 aid，其次链接与标题。
+
+        Args:
+            article: 文章数据字典。
+        Returns:
+            str: 去重键；三个字段都缺失时返回空字符串。
+        """
+        for field in ("aid", "link", "title"):
+            value = str(article.get(field, "") or "").strip()
+            if value:
+                return f"{field}:{value}"
+        return ""
 
     def _is_strategy_service_enabled(self) -> bool:
         """读取攻略服务开关。
@@ -108,33 +126,34 @@ class StrategyFeatureMixin(StrategyFeatureBase):
         self,
         name: str,
         article: dict[str, Any],
-    ) -> None:
+    ) -> bool:
         """当作者发布新文章时，发送更新通知给用户。
+
         Args:
             name: 作者名称。
             article: 文章信息字典，包含标题、简介和链接等。
         Returns:
-            None
+            bool: 通知是否已成功推送到全部目标；失败时调用方不应把该文章记为已推送。
         """
         title = str(article.get("title", ""))
         digest = str(article.get("digest", ""))
         link = str(article.get("link", ""))
-        await self._send_message(
+        sent = await self._send_message(
             f"作者: {name}\n文章标题: {title}\n文章简介: {digest}\n链接: {link}"
         )
         if name != "最强蜗牛":
-            return
+            return sent
 
         code_info = await self.get_code(link)
         code = code_info.get("code")
         if not code:
-            return
+            return sent
 
         send_txt = f"密令:{code}"
         if code_info.get("share") and digest:
             send_txt += f"\n{digest}"
             self.write_codes(digest.split("密令：")[-1])
-        await self._send_message(send_txt)
+        return await self._send_message(send_txt) and sent
 
     async def search_public_account_impl(
         self, event: AstrMessageEvent, keyword: str = "最强蜗牛", size: int = 5
@@ -343,14 +362,22 @@ class StrategyFeatureMixin(StrategyFeatureBase):
             return None
 
         fetched_articles: list[dict[str, Any]] = []
+        seen_keys: set[str] = set()
         begin = 0
         page_size = 20
+        page_index = 0
         cutoff_time = int(time.time()) - self.STRATEGY_SYNC_WINDOW_SECONDS
         headers = {"X-Auth-Key": self.config.get("exporter_auth_key")}
         api_url = self.config.get("exporter_api_url")
 
         async with aiohttp.ClientSession(timeout=self.HTTP_TIMEOUT) as session:
             while True:
+                if page_index >= self.STRATEGY_MAX_PAGES:
+                    logger.warning(
+                        f"作者 {author} 翻页达到上限 {self.STRATEGY_MAX_PAGES} 页，已停止同步"
+                    )
+                    break
+                page_index += 1
                 reached_cutoff = False
                 params = {"fakeid": fakeid, "begin": begin, "size": page_size}
                 try:
@@ -380,6 +407,7 @@ class StrategyFeatureMixin(StrategyFeatureBase):
                 if not isinstance(articles, list) or len(articles) == 0:
                     break
 
+                page_added = 0
                 for article in articles:
                     if not isinstance(article, dict):
                         continue
@@ -389,12 +417,29 @@ class StrategyFeatureMixin(StrategyFeatureBase):
                     if article_time is not None and article_time < cutoff_time:
                         reached_cutoff = True
                         continue
+                    article_key = self._get_article_key(article)
+                    if not article_key or article_key in seen_keys:
+                        continue
+                    seen_keys.add(article_key)
                     fetched_articles.append(article)
+                    page_added += 1
+                    if len(fetched_articles) >= self.STRATEGY_MAX_ARTICLES:
+                        logger.warning(
+                            f"作者 {author} 的文章达到上限 {self.STRATEGY_MAX_ARTICLES} 篇，已停止翻页"
+                        )
+                        reached_cutoff = True
+                        break
 
                 if reached_cutoff:
                     logger.debug("作者 %s 已同步到一周前文章，停止继续翻页", author)
                     break
                 if len(articles) < page_size:
+                    break
+                if page_added == 0:
+                    logger.warning(
+                        f"作者 {author} 第 {page_index} 页没有新文章，"
+                        "疑似接口忽略分页参数，已停止翻页"
+                    )
                     break
                 begin += page_size
                 await asyncio.sleep(random.uniform(1, 3))
@@ -403,9 +448,13 @@ class StrategyFeatureMixin(StrategyFeatureBase):
         return fetched_articles
 
     async def get_saved_account(self):
-        """获取已保存的公众号作者列表。
+        """拉取全部作者的最新文章，并推送尚未推送过的文章。
+
+        以 KV 中已有记录为基线：某个作者本轮同步失败时保留其原记录，不会丢失去重
+        信息；只有推送成功的文章才写入 pushed_aids，失败时下一轮继续重试。
+
         Returns:
-            dict: 已保存的作者字典，键为作者名称，值为作者的唯一标识。
+            None
         """
         if not self._is_strategy_service_enabled():
             logger.info("攻略服务已关闭，跳过攻略更新任务")
@@ -414,77 +463,128 @@ class StrategyFeatureMixin(StrategyFeatureBase):
         if not isinstance(authors, dict) or len(authors) == 0:
             return
         old_articles = await self.get_kv_data("articles", {})
-        if not isinstance(old_articles, dict) or not old_articles:
+        if not isinstance(old_articles, dict):
             old_articles = {}
-        new_articles = {}
+
+        # 以旧记录为基线：同步失败的作者必须原样保留，不能整表覆盖。
+        new_articles: dict[str, Any] = dict(old_articles)
         updata_flag = False
+
         for name, fakeid in authors.items():
             logger.debug(f"正在获取作者 {name} 的文章列表...")
             fetched_articles = await self._sync_author_articles(name, fakeid)
             if fetched_articles is None:
-                continue
-
-            article = self._get_latest_strategy_article(fetched_articles)
-            if article is None:
-                logger.debug(f"❌ 作者 {name} 没有可用文章")
-                continue
-
-            aid = article.get("aid")
-            link = str(article.get("link", ""))
-            if not link:
-                logger.warning(f"作者 {name} 的最新文章缺少链接，已跳过推送")
-                continue
-            if name in old_articles.keys():
-                old_aid = old_articles[name].get("aid")
-                if old_aid == aid:
-                    logger.debug(f"✅ 作者 {name} 未更新")
-                    new_articles[name] = old_articles[name]  # type: ignore
-                else:
-                    updata_flag = True
-                    new_articles[name] = article
-                    logger.debug(
-                        f"✅ 作者 {name} old_aid: {old_aid} aid: {aid} 发布了新文章: {article.get('title')}\n链接: {link}"
-                    )
-                    await self._notify_strategy_article_update(name, article)
+                logger.warning(f"作者 {name} 本轮同步失败，已保留原有推送记录")
             else:
-                updata_flag = True
-                new_articles[name] = article
-                logger.debug(
-                    f"✅ 作者 {name} aid: {aid} 发布了新文章: {article.get('title')}\n链接: {link}"
+                candidates = [
+                    item
+                    for item in fetched_articles
+                    if isinstance(item, dict)
+                    and item.get("is_deleted") is not True
+                    and item.get("author_name") != "广告"
+                ]
+                candidates.sort(
+                    key=lambda item: self._get_strategy_article_time(item) or 0,
+                    reverse=True,
                 )
-                await self._notify_strategy_article_update(name, article)
+                latest = candidates[0] if candidates else None
+                if latest is None:
+                    logger.debug(f"❌ 作者 {name} 没有可用文章")
+                elif not str(latest.get("link", "")).strip():
+                    logger.warning(f"作者 {name} 的最新文章缺少链接，已跳过推送")
+                else:
+                    state = old_articles.get(name)
+                    state = dict(state) if isinstance(state, dict) else {}
+                    pushed = [str(key) for key in state.get("pushed_aids", []) if key]
+                    legacy_key = f"aid:{state.get('aid')}" if state.get("aid") else ""
+                    if legacy_key and legacy_key not in pushed:
+                        pushed.append(legacy_key)
+                    original_pushed = list(pushed)
+
+                    first_sync = not pushed
+                    pending = [
+                        item
+                        for item in candidates
+                        if self._get_article_key(item) not in pushed
+                    ]
+                    if first_sync:
+                        # 首次接入只推最新一篇，成功后把整个窗口记为已推送，避免刷历史。
+                        pending = pending[:1]
+                    # 按旧到新的顺序推送，保证群里看到的时间线是正序。
+                    pending.reverse()
+
+                    pushed_items: list[dict[str, Any]] = []
+                    for item in pending:
+                        if not await self._notify_strategy_article_update(name, item):
+                            logger.warning(
+                                f"作者 {name} 的文章推送失败，下一轮继续重试: "
+                                f"{item.get('title')}"
+                            )
+                            break
+                        pushed_items.append(item)
+
+                    if first_sync and pushed_items:
+                        pushed = [
+                            self._get_article_key(item) for item in candidates
+                        ] + pushed
+                    else:
+                        for item in pushed_items:
+                            key = self._get_article_key(item)
+                            if key and key not in pushed:
+                                pushed.append(key)
+                    pushed = pushed[-self.STRATEGY_PUSHED_AIDS_KEEP :]
+
+                    # aid/title/link 记录“最后一次推送成功”的文章，而不是最新看到的文章，
+                    # 否则推送失败时会被下一轮误判为已推送。
+                    last_pushed = pushed_items[-1] if pushed_items else {}
+                    new_state = {
+                        "aid": last_pushed.get("aid", state.get("aid")),
+                        "title": last_pushed.get("title", state.get("title")),
+                        "link": last_pushed.get("link", state.get("link")),
+                        "pushed_aids": pushed,
+                    }
+                    if pushed_items or pushed != original_pushed:
+                        updata_flag = True
+                    new_articles[name] = new_state
+
             base_delay = 6
             random_factor = random.uniform(-5, 5)
             delay = max(5, base_delay + random_factor)
             logger.debug(f"等待 {delay:.2f} 秒后继续获取下一个作者的文章...")
             await asyncio.sleep(delay)
+
         if not updata_flag:
             logger.debug("没有新的文章更新")
         else:
             await self.put_kv_data("articles", new_articles)
 
-    async def _send_message(self, message: str):
+    async def _send_message(self, message: str) -> bool:
         """发送消息给已配置的推送用户。
+
         Args:
             message: 要发送的消息内容。
         Returns:
-            None
+            bool: 至少有一个推送目标且全部发送成功时返回 True；未配置目标或有失败返回 False。
         """
         try:
             data = self.read_file("push_datas", "strategy.json")
             users = data.get("datas", []) if data else []
             if not isinstance(users, list) or not users:
                 logger.warning("未配置推送用户，无法发送私聊消息")
-                return
+                return False
+            all_sent = True
             for user in users:
                 message_chain = MessageChain().message(message)
                 try:
                     await self.context.send_message(user, message_chain)  # type: ignore
                     logger.info(f"已发送消息给用户 {user}: {message}")
                 except Exception as e:
+                    all_sent = False
                     logger.error(f"发送消息给用户 {user} 失败: {e}")
+            return all_sent
         except Exception as e:
             logger.error(f"发送消息失败: {e}")
+            return False
 
     async def get_push_list_impl(self, event: AstrMessageEvent):
         """获取当前推送用户列表。
