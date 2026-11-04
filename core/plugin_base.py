@@ -4,6 +4,7 @@ import json
 import random
 import time
 from collections import defaultdict
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
@@ -48,6 +49,8 @@ DOWNLOAD_TIMEOUT = aiohttp.ClientTimeout(total=30, connect=10)
 MAX_DOWNLOAD_BYTES = 10 * 1024 * 1024
 CRON_MISFIRE_GRACE_SECONDS = 300
 INTERVAL_MISFIRE_GRACE_SECONDS = 30
+RENDER_CACHE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp"}
+RENDER_CACHE_MAX_AGE_SECONDS = 24 * 60 * 60
 
 
 class MarvelousSnailPluginBase(Star):
@@ -121,6 +124,16 @@ class MarvelousSnailPluginBase(Star):
         self.parse = Parse()
         self.data_dir.mkdir(parents=True, exist_ok=True)
         self.cache_dir.mkdir(parents=True, exist_ok=True)
+
+        try:
+            removed, freed = await asyncio.to_thread(self._prune_render_cache)
+            if removed:
+                logger.info(
+                    f"已清理 {removed} 个过期渲染缓存，"
+                    f"释放 {freed / 1024 / 1024:.1f} MB"
+                )
+        except (OSError, ValueError) as exc:
+            logger.warning(f"清理渲染缓存失败: {exc}")
 
         try:
             from .admin_page import SnailAdminPageController
@@ -488,6 +501,43 @@ class MarvelousSnailPluginBase(Star):
 
         logger.warning("未找到可用的 pillowmd 样式目录，状态输出将回退为文本")
         return None
+
+    def _prune_render_cache(
+        self, max_age_seconds: int = RENDER_CACHE_MAX_AGE_SECONDS
+    ) -> tuple[int, int]:
+        """删除渲染缓存目录中的过期图片。
+
+        渲染出来的状态卡/汇总图只在当轮发送与重试期间需要，长期堆积会挤占
+        AstrBot 的全局 temp 配额（core 的 TempDirCleaner 会波及其它插件）。
+
+        Args:
+            max_age_seconds: 保留时长，早于该时间的图片会被删除。
+        Returns:
+            tuple[int, int]: (删除文件数, 释放字节数)。
+        """
+        if not self.cache_dir.exists():
+            return (0, 0)
+
+        cutoff = time.time() - max_age_seconds
+        removed = 0
+        freed = 0
+        for path in self.cache_dir.iterdir():
+            if not path.is_file() or path.suffix.lower() not in RENDER_CACHE_SUFFIXES:
+                continue
+            try:
+                file_stat = path.stat()
+            except OSError:
+                continue
+            if file_stat.st_mtime >= cutoff:
+                continue
+            try:
+                path.unlink()
+            except OSError as exc:
+                logger.warning(f"清理渲染缓存失败: {path.name}: {exc}")
+                continue
+            removed += 1
+            freed += file_stat.st_size
+        return removed, freed
 
     async def _send_status_card(
         self,
@@ -1070,43 +1120,72 @@ class MarvelousSnailPluginBase(Star):
             return None
         return (str(account), self._get_bound_game_id(user), str(role_id))
 
-    def _find_role_owner(
-        self,
-        account: str,
-        game_id: str,
-        role_id: str,
-        requester_user_id: str | None = None,
-    ) -> str | None:
-        """查找指定角色的 QQ 所有者。
+    def _build_role_owner_index(self) -> dict[tuple[str, str, str], str]:
+        """一次性构建「角色身份 → 所属 QQ」索引。
 
-        如果历史数据中同一角色绑定在多个 QQ 下，优先选择绑定账号数量更少的
-        QQ；账号数相同则选择角色总数更少、QQ 字典序更小的用户，保证结果稳定。
+        批量绑定与网页导入按角色逐个做归属校验，逐次全量扫描是
+        O(角色数 × 用户数)。这里一次扫描建成索引，取舍规则与
+        `_cleanup_cross_user_duplicates` 保持一致：绑定账号数更少 >
+        角色数更少 > QQ 字典序更小。
+
+        Returns:
+            dict[tuple[str, str, str], str]: 角色身份到 QQ 的映射。
         """
-        target = (str(account), str(game_id), str(role_id))
-        matches: list[tuple[int, int, str]] = []
+        index: dict[tuple[str, str, str], str] = {}
+        best_rank: dict[tuple[str, str, str], tuple[int, int, str]] = {}
         user_dir = self._get_user_dir()
         if not user_dir.exists():
-            return None
+            return index
+
         for user_file in sorted(user_dir.glob("*.json")):
-            user_data = self._load_user_data(user_file.stem)
+            qq = user_file.stem
+            user_data = self._load_user_data(qq)
             users = user_data.get("users", []) if isinstance(user_data, dict) else []
-            if not isinstance(users, list):
+            if not isinstance(users, list) or not users:
                 continue
+
             accounts: set[str] = set()
-            matched = False
+            identities: list[tuple[str, str, str]] = []
             for user in users:
                 identity = self._role_identity_from_user(user)
                 if identity is None:
                     continue
                 accounts.add(identity[0])
-                if identity == target:
-                    matched = True
-            if matched:
-                matches.append((len(accounts), len(users), user_file.stem))
-        if not matches:
-            return None
-        matches.sort()
-        return matches[0][2]
+                identities.append(identity)
+
+            rank = (len(accounts), len(users), qq)
+            for identity in identities:
+                current = best_rank.get(identity)
+                if current is None or rank < current:
+                    best_rank[identity] = rank
+                    index[identity] = qq
+        return index
+
+    def _find_role_owner(
+        self,
+        account: str,
+        game_id: str,
+        role_id: str,
+        *,
+        owner_index: Mapping[tuple[str, str, str], str] | None = None,
+    ) -> str | None:
+        """查找指定角色的 QQ 所有者。
+
+        如果历史数据中同一角色绑定在多个 QQ 下，优先选择绑定账号数量更少的
+        QQ；账号数相同则选择角色总数更少、QQ 字典序更小的用户，保证结果稳定。
+
+        Args:
+            account: 账号，渠道服记录为 "channel:<platform>"。
+            game_id: 服务器 ID，渠道服记录为空字符串。
+            role_id: 角色 ID。
+            owner_index: 可选的预构建索引；批量场景传入以避免逐条全量扫描。
+        Returns:
+            str | None: 所有者 QQ，未找到时返回 None。
+        """
+        target = (str(account), str(game_id), str(role_id))
+        if owner_index is not None:
+            return owner_index.get(target)
+        return self._build_role_owner_index().get(target)
 
     def _cleanup_cross_user_duplicates(self) -> dict[str, int]:
         """清理跨 QQ 重复角色。

@@ -782,6 +782,8 @@ class WebBindingMixin:
             info = str(user.get("info", "")).strip()
             if info and identity not in bound_info_by_key:
                 bound_info_by_key[identity] = info
+        # 一次扫描建立归属索引，避免按角色逐个全量扫描用户目录。
+        owner_index = self._build_role_owner_index()
         consumed: set[str] = set()
         imported_users: list[dict[str, Any]] = []
         errors: list[str] = []
@@ -823,7 +825,7 @@ class WebBindingMixin:
                     message = f"重复绑定：{label} 已在当前 QQ 绑定"
                     outcomes[role_key] = {"state": "duplicate", "message": message}
                     continue
-                owner_qq = self._find_role_owner(*key, sender_key)
+                owner_qq = self._find_role_owner(*key, owner_index=owner_index)
                 if owner_qq is not None:
                     if owner_qq == sender_key:
                         consumed.add(role_key)
@@ -864,6 +866,7 @@ class WebBindingMixin:
                 outcomes[role_key] = {"state": "bound", "message": "渠道绑定成功"}
                 bound_keys.add(key)
                 consumed.add(role_key)
+                owner_index[(f"channel:{platform}", "", role_id)] = sender_key
                 continue
             try:
                 encrypted_account = record.get("account") or record["phone"]
@@ -895,7 +898,9 @@ class WebBindingMixin:
                 outcomes[role_key] = {"state": "failed", "message": message}
                 continue
             info = self._format_role_info(matched)
-            owner_qq = self._find_role_owner(account, game_id, role_id, sender_key)
+            owner_qq = self._find_role_owner(
+                account, game_id, role_id, owner_index=owner_index
+            )
             if owner_qq is not None:
                 if owner_qq == sender_key:
                     consumed.add(role_key)
@@ -932,6 +937,7 @@ class WebBindingMixin:
             outcomes[role_key] = {"state": "bound", "message": "绑定成功"}
             bound_keys.add(key)
             consumed.add(role_key)
+            owner_index[(account, game_id, role_id)] = sender_key
 
         if imported_users and not self._save_user_data(
             sender_key, {"num": len(users), "users": users}

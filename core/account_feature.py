@@ -272,7 +272,7 @@ class AccountFeatureMixin(AccountFeatureBase):
                     controller.stop()
                     return
                 owner_qq = self._find_role_owner(
-                    account, selected_game_id, selected_role_id, sender_id
+                    account, selected_game_id, selected_role_id
                 )
                 if owner_qq is not None:
                     if owner_qq == sender_id:
@@ -429,6 +429,9 @@ class AccountFeatureMixin(AccountFeatureBase):
         failed_lines: list[str] = []
         await event.send(event.plain_result("⏳ 正在执行批量绑定,请稍候..."))
         binding_paused = ""
+        # 一次扫描建立归属索引：批量过程中每条角色都要查重，逐条全量扫描是
+        # O(条目数 × 用户数)，会长时间占用事件循环。
+        owner_index = self._build_role_owner_index()
         for server_name, entries in payload.items():
             if binding_paused:
                 break
@@ -509,7 +512,10 @@ class AccountFeatureMixin(AccountFeatureBase):
                         selected_game_id = expected_game_id or "39"
                     selected_role_id = str(selected_user.get("role_id", uid))
                     owner_qq = self._find_role_owner(
-                        phone, selected_game_id, selected_role_id, sender_id
+                        phone,
+                        selected_game_id,
+                        selected_role_id,
+                        owner_index=owner_index,
                     )
                     if owner_qq is not None:
                         failed_count += 1
@@ -568,6 +574,11 @@ class AccountFeatureMixin(AccountFeatureBase):
                     if not self._append_user_record(sender_id, user_record):
                         storage_error = True
                         logger.error(f"批量绑定写回本地失败: {selected_info}")
+                    else:
+                        # 同步更新索引，保证同一批次内重复出现的角色仍能被拦下。
+                        identity = self._role_identity_from_user(user_record)
+                        if identity is not None:
+                            owner_index[identity] = sender_id
 
                     success_count += 1
                     gift_prefix = "✅" if gift_summary["success_count"] > 0 else "ℹ️"
