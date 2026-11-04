@@ -38,10 +38,7 @@ from .utils import atomic_write_json, cron_to_human, get_week, merge_signed_user
 PLUGIN_NAME = "astrbot_plugin_marvelous_snail"
 
 SIGNIN_SUMMARY_MAX_LINES = 20
-SIGNIN_SUMMARY_MAX_CHARS = 1800
 SIGNIN_SUMMARY_TEXT_MAX_CHARS = 1500
-SIGNIN_SUMMARY_IMAGES_PER_BATCH = 3
-SIGNIN_SUMMARY_MAX_IMAGE_BYTES = 4 * 1024 * 1024
 SIGNIN_SUMMARY_TEXT_NODES_PER_BATCH = 4
 SIGNIN_SUMMARY_SEND_INTERVAL_SECONDS = 0.8
 SIGNIN_SUMMARY_RETRY_DELAY_SECONDS = 2.0
@@ -942,32 +939,6 @@ class MarvelousSnailPluginBase(Star):
         if stop_event:
             event.stop_event()
 
-    @staticmethod
-    def _batch_image_paths(image_paths: list[str]) -> list[list[str]]:
-        """按数量与总字节数切分图片，避免单个转发节点过大。"""
-        batches: list[list[str]] = []
-        current: list[str] = []
-        current_bytes = 0
-        for image_path in image_paths:
-            try:
-                image_bytes = max(0, Path(image_path).stat().st_size)
-            except OSError:
-                image_bytes = 0
-            exceeds_bytes = bool(
-                current and current_bytes + image_bytes > SIGNIN_SUMMARY_MAX_IMAGE_BYTES
-            )
-            if current and (
-                len(current) >= SIGNIN_SUMMARY_IMAGES_PER_BATCH or exceeds_bytes
-            ):
-                batches.append(current)
-                current = []
-                current_bytes = 0
-            current.append(image_path)
-            current_bytes += image_bytes
-        if current:
-            batches.append(current)
-        return batches
-
     async def _send_summary_chain_with_retry(
         self,
         target: str,
@@ -992,51 +963,39 @@ class MarvelousSnailPluginBase(Star):
         self,
         target: str,
         content: str,
-        image_paths: list[str],
         *,
         reward_image_path: str | None = None,
     ) -> bool:
-        """向单个目标发送分页签到汇总，并在需要时降级为文本。"""
+        """向单个目标发送分页签到汇总文本，并在需要时追加奖励图片。
+
+        Args:
+            target: 推送目标（统一消息来源）。
+            content: 已渲染为纯文本的汇总内容。
+            reward_image_path: 可选的当天奖励图片路径。
+        Returns:
+            bool: 汇总文本是否全部发送成功。
+        """
         sent = True
-        if image_paths:
-            image_batches = self._batch_image_paths(image_paths)
-            for index, batch in enumerate(image_batches):
-                if len(batch) == 1:
-                    chain = MessageChain().file_image(batch[0])
-                else:
-                    forward = self._build_forward_nodes(batch, "最强蜗牛签到", "0")
-                    chain = MessageChain(chain=[forward])
-                if not await self._send_summary_chain_with_retry(
-                    target,
-                    chain,
-                    label=f"签到汇总图片批次 {index + 1} ",
-                ):
-                    sent = False
-                if index < len(image_batches) - 1:
-                    await asyncio.sleep(SIGNIN_SUMMARY_SEND_INTERVAL_SECONDS)
-        else:
-            text_chunks = self._split_markdown_chunks(
-                content,
-                SIGNIN_SUMMARY_MAX_LINES,
-                SIGNIN_SUMMARY_TEXT_MAX_CHARS,
-            )
-            for start in range(
-                0, len(text_chunks), SIGNIN_SUMMARY_TEXT_NODES_PER_BATCH
+        text_chunks = self._split_markdown_chunks(
+            content,
+            SIGNIN_SUMMARY_MAX_LINES,
+            SIGNIN_SUMMARY_TEXT_MAX_CHARS,
+        )
+        for start in range(0, len(text_chunks), SIGNIN_SUMMARY_TEXT_NODES_PER_BATCH):
+            batch = text_chunks[start : start + SIGNIN_SUMMARY_TEXT_NODES_PER_BATCH]
+            if len(batch) == 1:
+                chain = MessageChain().message(batch[0])
+            else:
+                forward = self._build_text_forward_nodes(batch, "最强蜗牛签到", "0")
+                chain = MessageChain(chain=[forward])
+            if not await self._send_summary_chain_with_retry(
+                target,
+                chain,
+                label="签到汇总文本批次 ",
             ):
-                batch = text_chunks[start : start + SIGNIN_SUMMARY_TEXT_NODES_PER_BATCH]
-                if len(batch) == 1:
-                    chain = MessageChain().message(batch[0])
-                else:
-                    forward = self._build_text_forward_nodes(batch, "最强蜗牛签到", "0")
-                    chain = MessageChain(chain=[forward])
-                if not await self._send_summary_chain_with_retry(
-                    target,
-                    chain,
-                    label="签到汇总文本批次 ",
-                ):
-                    sent = False
-                if start + len(batch) < len(text_chunks):
-                    await asyncio.sleep(SIGNIN_SUMMARY_SEND_INTERVAL_SECONDS)
+                sent = False
+            if start + len(batch) < len(text_chunks):
+                await asyncio.sleep(SIGNIN_SUMMARY_SEND_INTERVAL_SECONDS)
 
         if reward_image_path:
             reward_chain = MessageChain().file_image(reward_image_path)
@@ -1056,26 +1015,21 @@ class MarvelousSnailPluginBase(Star):
         *,
         reward_image_path: str | None = None,
     ) -> dict[str, bool]:
-        """渲染一次签到汇总，并向全部目标分批发送。"""
-        image_paths: list[str] = []
-        if self.style:
-            try:
-                image_paths = await self._render_markdown_chunks(
-                    content,
-                    max_lines=SIGNIN_SUMMARY_MAX_LINES,
-                    max_chars=SIGNIN_SUMMARY_MAX_CHARS,
-                )
-            except Exception as exc:
-                logger.error(f"渲染签到汇总失败，将回退为分页文本：{exc}")
-                image_paths = []
+        """向全部目标分批发送签到汇总文本。
 
+        Args:
+            targets: 推送目标列表。
+            content: 已渲染为纯文本的汇总内容。
+            reward_image_path: 可选的当天奖励图片路径。
+        Returns:
+            dict[str, bool]: 每个目标的发送结果。
+        """
         results: dict[str, bool] = {}
         for index, target in enumerate(targets):
             try:
                 results[target] = await self._send_signin_summary_to_target(
                     target,
                     content,
-                    image_paths,
                     reward_image_path=reward_image_path,
                 )
             except Exception as exc:

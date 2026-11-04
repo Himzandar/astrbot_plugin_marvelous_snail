@@ -288,7 +288,20 @@ def build_signin_summary(
     stats: dict[str, Any],
     detail_mode: str,
     generated_at: float | None = None,
+    markdown: bool = True,
 ) -> str:
+    """生成签到汇总文本。
+
+    Args:
+        records: 角色级记录。
+        users: 用户级记录。
+        stats: 运行统计。
+        detail_mode: 明细模式（issues_overview / issues_only / full）。
+        generated_at: 生成时间戳，默认当前时间。
+        markdown: 为真时输出 Markdown 标题；为假时输出适合直接发群的【】标题。
+    Returns:
+        str: 汇总文本。
+    """
     mode = (
         detail_mode
         if detail_mode in SUMMARY_DETAIL_MODES
@@ -296,17 +309,23 @@ def build_signin_summary(
     )
     timestamp = float(generated_at if generated_at is not None else time.time())
     run_time = datetime.fromtimestamp(timestamp).strftime("%Y-%m-%d %H:%M")
+
+    def heading(text: str, level: int) -> str:
+        if markdown:
+            return f"{'#' * level} {text}"
+        return f"【{text}】"
+
     lines = [
-        f"# 最强蜗牛定时签到 · {run_time}",
+        heading(f"最强蜗牛定时签到 · {run_time}", 1),
         "",
-        "## 运行汇总",
+        heading("运行汇总", 2),
         *_format_stats(stats),
     ]
 
     issues = sorted(
         (record for record in records if _is_issue(record)), key=_issue_sort_key
     )
-    lines.extend(["", "## 需要处理"])
+    lines.extend(["", heading("需要处理", 2)])
     if issues:
         lines.extend(format_role_record(record, issue=True) for record in issues)
     else:
@@ -316,13 +335,13 @@ def build_signin_summary(
         lines.extend(
             [
                 "",
-                "## 用户概览",
+                heading("用户概览", 2),
                 "- 图例：签到成功数/总数 · 礼包成功/部分失败/失败/无可领",
             ]
         )
         lines.extend(_format_user_overview(row) for row in users)
     elif mode == "full":
-        lines.extend(["", "## 完整角色明细"])
+        lines.extend(["", heading("完整角色明细", 2)])
         if records:
             lines.extend(format_role_record(record) for record in records)
         else:

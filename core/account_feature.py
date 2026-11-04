@@ -1338,6 +1338,8 @@ class AccountFeatureMixin(AccountFeatureBase):
                     detail_mode=str(
                         notification_settings.get("detail_mode", "issues_overview")
                     ),
+                    # 汇总直接发文本，不再渲染成图片。
+                    markdown=False,
                 )
                 summary_text += (
                     "\n\n账号绑定已恢复。"
