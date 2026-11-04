@@ -1,4 +1,7 @@
 # sign_in.py
+import asyncio
+import random
+import time
 import urllib.parse
 
 import aiohttp
@@ -8,6 +11,15 @@ from astrbot.api import logger
 api = "https://api.qingcigame.com"
 app_id = "39"
 REQUEST_TIMEOUT = aiohttp.ClientTimeout(total=30)
+# 服务端不可用时的快速失败超时，避免每个角色都等满 30 秒。
+DEGRADED_TIMEOUT = aiohttp.ClientTimeout(total=10, connect=5)
+MAX_ATTEMPTS = 3
+RETRY_BASE_DELAY = 1.0
+RETRY_MAX_DELAY = 8.0
+RETRYABLE_STATUS = {429, 500, 502, 503, 504}
+# 连续失败这么多次后暂停重试，避免接口整体故障时把一次全量签到拖成数小时。
+OUTAGE_THRESHOLD = 3
+OUTAGE_COOLDOWN_SECONDS = 120
 CHANNEL_BIND_URL = f"{api}/game/binds/channel"
 CHANNEL_SIGN_SUPPORTED = True
 CHANNEL_SIGN_PENDING_MESSAGE = "等待渠道服签到"
@@ -21,9 +33,78 @@ CHANNEL_PLATFORM_NAMES = {
     "honor": "荣耀",
 }
 
+_RETRY_STATE = {"failures": 0, "paused_until": 0.0}
+
+
+def _reset_retry_state() -> None:
+    """重置熔断状态，供测试与手动恢复使用。"""
+    _RETRY_STATE["failures"] = 0
+    _RETRY_STATE["paused_until"] = 0.0
+
+
+def _retry_delay(attempt: int, retry_after: float | None = None) -> float:
+    """计算第 attempt 次失败后的等待时间。
+
+    Args:
+        attempt: 已失败的次数，从 1 开始。
+        retry_after: 服务端 Retry-After 提示的秒数。
+    Returns:
+        float: 等待秒数，带抖动，且不超过上限。
+    """
+    if retry_after is not None:
+        return max(0.5, min(retry_after, RETRY_MAX_DELAY))
+    delay = RETRY_BASE_DELAY * (2 ** (attempt - 1))
+    return min(RETRY_MAX_DELAY, delay) * random.uniform(0.8, 1.2)
+
+
+def _parse_retry_after(response) -> float | None:
+    """读取响应头中的 Retry-After 秒数。
+
+    Args:
+        response: aiohttp 响应对象。
+    Returns:
+        float | None: 解析成功返回秒数，否则返回 None。
+    """
+    headers = getattr(response, "headers", None) or {}
+    try:
+        value = float(str(headers.get("Retry-After", "")).strip())
+    except (TypeError, ValueError):
+        return None
+    return value if value > 0 else None
+
+
+def _is_retry_paused() -> bool:
+    """判断是否处于熔断冷却期。
+
+    Returns:
+        bool: 冷却期内返回 True。
+    """
+    return time.time() < _RETRY_STATE["paused_until"]
+
+
+def _note_failure() -> None:
+    """记录一次最终失败，必要时进入冷却期。"""
+    _RETRY_STATE["failures"] += 1
+    if _RETRY_STATE["failures"] >= OUTAGE_THRESHOLD:
+        _RETRY_STATE["paused_until"] = time.time() + OUTAGE_COOLDOWN_SECONDS
+        logger.error(
+            f"连续 {_RETRY_STATE['failures']} 次请求失败，"
+            f"暂停重试 {OUTAGE_COOLDOWN_SECONDS} 秒并使用快速失败超时"
+        )
+
+
+def _note_success() -> None:
+    """记录一次成功，清空连续失败计数。"""
+    _RETRY_STATE["failures"] = 0
+
 
 async def _request_json(method: str, url: str, **kwargs):
-    """发送请求并统一处理网络异常、超时和非 200 响应。
+    """发送请求并统一处理网络异常、超时、限流与 5xx 重试。
+
+    单次抖动（5xx、超时）不再直接判定当日签到失败：可重试状态最多尝试
+    MAX_ATTEMPTS 次，指数退避并尊重 Retry-After。连续失败达到阈值后进入
+    冷却期，改用快速失败超时且不再重试，避免接口整体故障时把全量签到拖长。
+
     Args:
         method: HTTP 方法，如 "get" 或 "post"。
         url: 请求的 URL。
@@ -31,21 +112,56 @@ async def _request_json(method: str, url: str, **kwargs):
     Returns:
         dict: 如果请求成功返回 JSON 数据，否则返回 None。
     """
-    try:
-        async with aiohttp.ClientSession(timeout=REQUEST_TIMEOUT) as session:
-            request = getattr(session, method)
-            async with request(url, **kwargs) as response:
-                if response.status != 200:
-                    body = await response.text()
-                    logger.error(
-                        f"请求 {url} 失败，HTTP 状态码: {response.status}，响应: {body[:200]}"
-                    )
-                    return None
-                return await response.json(content_type=None)
-    except aiohttp.ClientError as exc:
-        logger.error(f"请求 {url} 失败: {exc}")
-    except Exception as exc:
-        logger.error(f"请求 {url} 时出现未处理异常: {exc}")
+    paused = _is_retry_paused()
+    attempts = 1 if paused else MAX_ATTEMPTS
+    timeout = DEGRADED_TIMEOUT if paused else REQUEST_TIMEOUT
+    last_error = ""
+
+    for attempt in range(1, attempts + 1):
+        retry_after: float | None = None
+        try:
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                request = getattr(session, method)
+                async with request(url, **kwargs) as response:
+                    status = response.status
+                    if status == 200:
+                        try:
+                            payload = await response.json(content_type=None)
+                        except ValueError as exc:
+                            last_error = f"响应不是合法 JSON: {exc}"
+                        else:
+                            _note_success()
+                            return payload
+                    elif status in RETRYABLE_STATUS:
+                        retry_after = _parse_retry_after(response)
+                        body = await response.text()
+                        last_error = f"HTTP {status}"
+                        logger.warning(
+                            f"请求 {url} 返回 HTTP {status}"
+                            f"（第 {attempt}/{attempts} 次），响应: {body[:200]}"
+                        )
+                    else:
+                        body = await response.text()
+                        logger.error(
+                            f"请求 {url} 失败，HTTP 状态码: {status}，响应: {body[:200]}"
+                        )
+                        return None
+        except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+            last_error = f"{type(exc).__name__}: {exc}"
+            logger.warning(f"请求 {url} 失败（第 {attempt}/{attempts} 次）: {exc}")
+        except Exception as exc:
+            logger.error(f"请求 {url} 时出现未处理异常: {exc}")
+            return None
+
+        if attempt >= attempts:
+            break
+        await asyncio.sleep(_retry_delay(attempt, retry_after))
+
+    _note_failure()
+    if paused:
+        logger.warning(f"请求 {url} 失败（熔断冷却中，未重试）: {last_error}")
+    else:
+        logger.error(f"请求 {url} 重试 {attempts} 次后仍失败: {last_error}")
     return None
 
 
