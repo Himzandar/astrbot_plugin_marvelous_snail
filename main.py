@@ -39,6 +39,8 @@ class MarvelousSnailPlugin(
         Returns:
             异步生成器，返回搜索结果。
         """
+        if await self._pause_if_strategy_disabled(event):
+            return
         async for result in self.search_public_account_impl(event, keyword, size):
             yield result
 
@@ -52,6 +54,8 @@ class MarvelousSnailPlugin(
         Returns:
             异步生成器，返回添加结果。
         """
+        if await self._pause_if_strategy_disabled(event):
+            return
         async for result in self.add_saved_account_impl(event, index):
             yield result
 
@@ -65,6 +69,8 @@ class MarvelousSnailPlugin(
         Returns:
             异步生成器，返回删除结果。
         """
+        if await self._pause_if_strategy_disabled(event):
+            return
         async for result in self.del_saved_account_impl(event, name):
             yield result
 
@@ -77,6 +83,8 @@ class MarvelousSnailPlugin(
         Returns:
             异步生成器，返回已保存账号列表。
         """
+        if await self._pause_if_strategy_disabled(event):
+            return
         async for result in self.list_saved_accounts_impl(event):
             yield result
 
@@ -89,6 +97,8 @@ class MarvelousSnailPlugin(
         Returns:
             异步生成器，返回攻略推送列表。
         """
+        if await self._pause_if_strategy_disabled(event):
+            return
         async for result in self.get_push_list_impl(event):
             yield result
 
@@ -101,6 +111,8 @@ class MarvelousSnailPlugin(
         Returns:
             异步生成器，返回操作结果。
         """
+        if await self._pause_if_strategy_disabled(event):
+            return
         async for result in self.push_zqwn_impl(event, enabled):
             yield result
 
@@ -113,6 +125,8 @@ class MarvelousSnailPlugin(
         Returns:
             异步生成器，返回查询结果。
         """
+        if await self._pause_if_strategy_disabled(event):
+            return
         await self.get_strategy_impl(event, parse_str)
 
     @zqwn.command("特工逃犯")

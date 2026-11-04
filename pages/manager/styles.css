@@ -575,6 +575,17 @@ svg {
   grid-template-columns: repeat(4, minmax(0, 1fr));
 }
 
+.strategy-service-panel {
+  margin-bottom: 16px;
+  padding: 14px 18px;
+}
+
+.strategy-service-panel .setting-toggle {
+  border: none;
+  background: transparent;
+  padding: 4px 0;
+}
+
 .stat-value-text {
   font-size: clamp(21px, 2.2vw, 29px);
   letter-spacing: -0.035em;

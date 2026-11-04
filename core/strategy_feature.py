@@ -12,6 +12,7 @@ from astrbot.core.platform import MessageType as PlatformMessageType
 from astrbot.core.utils.session_waiter import SessionController, session_waiter
 
 from .code import parse_code
+from .strategy_settings import is_strategy_service_enabled
 from .utils import atomic_write_json
 
 if TYPE_CHECKING:
@@ -28,6 +29,47 @@ class StrategyFeatureMixin(StrategyFeatureBase):
 
     STRATEGY_SYNC_WINDOW_SECONDS = 7 * 24 * 60 * 60
     HTTP_TIMEOUT = aiohttp.ClientTimeout(total=30, connect=10)
+
+    def _is_strategy_service_enabled(self) -> bool:
+        """读取攻略服务开关。
+
+        读取失败时按“开启”处理，避免因为一个设置文件问题让功能整体不可用。
+
+        Returns:
+            bool: 攻略服务是否开启。
+        """
+        try:
+            return is_strategy_service_enabled(self.data_dir)
+        except (AttributeError, OSError, TypeError, ValueError) as exc:
+            logger.warning(f"读取攻略服务开关失败，按开启处理: {exc}")
+            return True
+
+    def _strategy_paused_message(self) -> str:
+        """返回攻略服务暂停时的统一提示。
+
+        Returns:
+            str: 面向用户的提示文案。
+        """
+        return (
+            "⏸ 攻略服务已暂停\n"
+            "数据源（wechat-article-exporter）当前不可用，"
+            "作者管理、搜索攻略、攻略推送与更新任务已统一关闭。\n"
+            "如需恢复，请管理员在管理页「攻略服务」中重新开启。"
+        )
+
+    async def _pause_if_strategy_disabled(self, event: AstrMessageEvent) -> bool:
+        """攻略服务关闭时统一拦截攻略相关指令。
+
+        Args:
+            event: 消息事件对象。
+        Returns:
+            bool: 已拦截并回复时返回 True，否则返回 False。
+        """
+        if self._is_strategy_service_enabled():
+            return False
+        await event.send(event.plain_result(self._strategy_paused_message()))
+        event.stop_event()
+        return True
 
     @staticmethod
     def _get_strategy_article_time(article: dict[str, Any]) -> int | None:
@@ -365,6 +407,9 @@ class StrategyFeatureMixin(StrategyFeatureBase):
         Returns:
             dict: 已保存的作者字典，键为作者名称，值为作者的唯一标识。
         """
+        if not self._is_strategy_service_enabled():
+            logger.info("攻略服务已关闭，跳过攻略更新任务")
+            return
         authors = await self.get_kv_data("authors", {}) or {}
         if not isinstance(authors, dict) or len(authors) == 0:
             return

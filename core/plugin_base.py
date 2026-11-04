@@ -32,7 +32,7 @@ from .sign_in import (
     sign_request,
 )
 from .signin_preferences import load_sign_push_payload, load_signin_settings
-from .utils import atomic_write_json, cron_to_human, get_week
+from .utils import atomic_write_json, cron_to_human, get_week, merge_signed_users
 
 PLUGIN_NAME = "astrbot_plugin_marvelous_snail"
 
@@ -151,7 +151,11 @@ class MarvelousSnailPluginBase(Star):
             logger.error(f"无法加载 pillowmd 样式：{e}")
 
         self.scheduler.remove_all_jobs()
-        if self.config.get("exporter_auth_key") and self.config.get("exporter_api_url"):
+        if not self._is_strategy_service_enabled():
+            logger.info("攻略服务已关闭，已跳过攻略更新监控任务")
+        elif self.config.get("exporter_auth_key") and self.config.get(
+            "exporter_api_url"
+        ):
             await self._start_auto_job(
                 "get_updata_job", "*/50 * * * *", self.get_saved_account
             )
@@ -1247,6 +1251,92 @@ class MarvelousSnailPluginBase(Star):
         except Exception as e:
             logger.error(f"写入用户数据失败: {e}")
             return False
+
+    def _user_file_revision(self, user_id: str) -> tuple[int, int] | None:
+        """返回用户绑定文件的轻量版本标记。
+
+        Args:
+            user_id: 用户 ID。
+        Returns:
+            tuple[int, int] | None: (mtime_ns, size)，文件不存在或不可读时返回 None。
+        """
+        user_file = self._get_user_file(user_id)
+        try:
+            file_stat = user_file.stat()
+        except OSError:
+            return None
+        return (file_stat.st_mtime_ns, file_stat.st_size)
+
+    def _save_user_data_snapshot(
+        self,
+        user_id: str,
+        expected_revision: tuple[int, int] | None,
+        users: list[dict[str, Any]],
+    ) -> bool:
+        """写回长时间任务的签到结果，避免覆盖任务期间的用户改动。
+
+        全量签到要跨数分钟到数十分钟，期间用户可能在管理页或其它入口增删绑定。
+        直接整体覆盖会复活已删除的角色、丢掉新增的绑定；这里在检测到文件变化时
+        按角色身份合并，只把签到状态写回仍然存在的记录。
+
+        Args:
+            user_id: 用户 ID。
+            expected_revision: 任务开始时读取到的文件版本标记。
+            users: 本次任务产生的绑定记录列表。
+        Returns:
+            bool: 保存是否成功；文件已被删除时视为成功（不复活）。
+        """
+        current_revision = self._user_file_revision(user_id)
+        if current_revision is None:
+            if expected_revision is not None:
+                logger.info(
+                    "用户 %s 的绑定数据已在任务执行期间删除，已跳过写回", user_id
+                )
+            return True
+
+        if expected_revision is not None and current_revision != expected_revision:
+            latest = self._load_user_data(user_id)
+            latest_users = latest.get("users", []) if isinstance(latest, dict) else []
+            if isinstance(latest_users, list):
+                users = merge_signed_users(
+                    latest_users, users, self._role_identity_from_user
+                )
+                logger.info(
+                    "用户 %s 的绑定数据在任务执行期间发生变化，已按角色身份合并签到结果",
+                    user_id,
+                )
+
+        return self._save_user_data(user_id, {"num": len(users), "users": users})
+
+    def _append_user_record(self, user_id: str, record: dict[str, Any]) -> bool:
+        """按单条记录增量落盘一条绑定。
+
+        批量绑定会在循环里等待多次网络请求，攒到最后一次性写盘时一旦异常或
+        插件重载就会整批丢失。这里每次成功都基于磁盘上的最新数据追加，并且
+        用角色身份去重，避免重复追加。
+
+        Args:
+            user_id: 用户 ID。
+            record: 单条绑定记录。
+        Returns:
+            bool: 保存是否成功。
+        """
+        data = self._load_user_data(user_id) or {"num": 0, "users": []}
+        users = data.get("users", []) if isinstance(data, dict) else []
+        if not isinstance(users, list):
+            users = []
+
+        identity = self._role_identity_from_user(record)
+        if identity is not None:
+            for existing in users:
+                if (
+                    isinstance(existing, dict)
+                    and self._role_identity_from_user(existing) == identity
+                ):
+                    return True
+
+        users.append(record)
+        return self._save_user_data(user_id, {"num": len(users), "users": users})
 
     def _build_sign_status(self, state: str, message: str) -> dict[str, Any]:
         """构造统一的签到状态记录结构，便于后续落盘与展示。

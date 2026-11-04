@@ -4,6 +4,7 @@ import json
 import os
 import tempfile
 import urllib.parse
+from collections.abc import Callable
 from datetime import datetime
 from functools import lru_cache
 from pathlib import Path
@@ -62,6 +63,66 @@ def atomic_write_json(
         if descriptor_open:
             os.close(file_descriptor)
         temp_path.unlink(missing_ok=True)
+
+
+def merge_signed_users(
+    current_users: list[Any],
+    signed_users: list[dict[str, Any]],
+    identity_of: Callable[[dict[str, Any]], tuple[str, str, str] | None],
+) -> list[dict[str, Any]]:
+    """Merge one sign-in pass onto the latest on-disk binding list.
+
+    A full sign-in pass loads a snapshot, spends minutes on network work and only
+    then persists sign results. Writing that snapshot back verbatim would
+    resurrect roles deleted in the meantime and drop bindings added after the
+    snapshot. This keeps deletions, keeps additions, and copies only the fields
+    the pass is authoritative for.
+
+    Args:
+        current_users: Binding records loaded from disk right before writing.
+        signed_users: Binding records produced by the finished sign-in pass.
+        identity_of: Returns the (account, game_id, role_id) identity of a record,
+            or None when the record cannot be identified.
+
+    Returns:
+        Merged record list, ordered like the finished pass with additions last.
+    """
+    current_by_identity: dict[tuple[str, str, str], dict[str, Any]] = {}
+    unidentified: list[dict[str, Any]] = []
+    for record in current_users:
+        if not isinstance(record, dict):
+            continue
+        identity = identity_of(record)
+        if identity is None:
+            unidentified.append(record)
+        else:
+            current_by_identity[identity] = record
+
+    merged: list[dict[str, Any]] = []
+    applied: set[tuple[str, str, str]] = set()
+    for update in signed_users:
+        identity = identity_of(update)
+        target = current_by_identity.get(identity) if identity is not None else None
+        if target is None:
+            # Deleted while the pass was running: do not write it back.
+            continue
+        sign_status = update.get("sign_status")
+        if isinstance(sign_status, dict):
+            target["sign_status"] = sign_status
+        info = str(update.get("info") or "").strip()
+        if info:
+            target["info"] = info
+        if update.get("game_id") is not None:
+            target["game_id"] = update["game_id"]
+        merged.append(target)
+        applied.add(identity)
+
+    for identity, record in current_by_identity.items():
+        if identity not in applied:
+            # Bound after the pass started: keep it untouched.
+            merged.append(record)
+    merged.extend(unidentified)
+    return merged
 
 
 def cron_to_human(cron: str) -> str:

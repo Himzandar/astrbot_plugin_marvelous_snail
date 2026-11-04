@@ -24,6 +24,7 @@ from .signin_preferences import (
     write_signin_settings,
 )
 from .signin_summary import SUMMARY_DETAIL_MODE_LABELS, SUMMARY_DETAIL_MODES
+from .strategy_settings import set_strategy_service_enabled
 from .utils import atomic_write_json
 
 try:
@@ -57,6 +58,15 @@ SIGN_STATES = {
     "invalid",
     "unknown",
 }
+STRATEGY_AFFECTED_COMMANDS = [
+    "最强蜗牛 作者搜索",
+    "最强蜗牛 作者添加",
+    "最强蜗牛 作者删除",
+    "最强蜗牛 作者列表",
+    "最强蜗牛 攻略推送",
+    "最强蜗牛 攻略推送列表",
+    "最强蜗牛 搜索攻略",
+]
 AUTHOR_NAME_FORBIDDEN_RE = re.compile(r'[\x00-\x1f\x7f/\\:*?"<>|]')
 PUSH_PLATFORM_RE = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
 PUSH_TARGET_RE = re.compile(r"^[^\s:]{1,128}$")
@@ -344,6 +354,7 @@ class SnailAdminPageService:
             None,
         )
         snapshot["scheduler_running"] = bool(runtime.get("scheduler_running"))
+        snapshot["service_enabled"] = self.plugin._is_strategy_service_enabled()
         return snapshot
 
     async def _load_saved_authors(self) -> dict[str, Any]:
@@ -584,6 +595,31 @@ class SnailAdminPageService:
             "action": "delete-notification",
             "target": target,
             "remaining": len(targets),
+        }
+
+    def set_strategy_service_enabled(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """开启或关闭攻略服务。
+
+        Args:
+            payload: 请求体，`enabled` 为目标开关状态。
+        Returns:
+            操作结果，包含保存后的开关状态与受影响的指令数量。
+        Raises:
+            ValueError: `enabled` 不是布尔值时抛出。
+        """
+        enabled = payload.get("enabled")
+        if not isinstance(enabled, bool):
+            raise ValueError("enabled 必须为布尔值")
+        settings = set_strategy_service_enabled(self._plugin_data_dir(), enabled)
+        enabled_now = bool(settings["service"]["enabled"])
+        logger.info(
+            "最强蜗牛攻略服务已%s：攻略作者、搜索攻略、攻略推送与更新任务同步生效",
+            "开启" if enabled_now else "关闭",
+        )
+        return {
+            "action": "set-strategy-service",
+            "enabled": enabled_now,
+            "affected_commands": STRATEGY_AFFECTED_COMMANDS,
         }
 
     async def create_strategy_author(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -898,7 +934,7 @@ class SnailAdminPageService:
         if conflict is not None:
             self._raise_role_conflict(conflict, qq)
 
-        data, users = self._load_users_for_update(qq, allow_missing=True)
+        data, users, revision = self._load_users_for_update(qq, allow_missing=True)
         record = {
             "account": self.plugin._encrypt_data(account),
             "role_id": self.plugin._encrypt_data(role_id),
@@ -908,7 +944,7 @@ class SnailAdminPageService:
             "sign_status": self.plugin._build_sign_status("pending", "等待首次签到"),
         }
         users.append(record)
-        self._save_users(qq, data, users)
+        self._save_users(qq, data, users, revision)
         logger.info("最强蜗牛管理页新增绑定：QQ %s，角色序号 %s", qq, len(users))
         return {"action": "create", "qq": qq, "roles": len(users), "index": len(users)}
 
@@ -916,7 +952,7 @@ class SnailAdminPageService:
         self._ensure_mutation_allowed()
         qq = _normalize_qq(payload.get("qq"))
         index = _as_int(payload.get("index"), -1)
-        data, users = self._load_users_for_update(qq)
+        data, users, revision = self._load_users_for_update(qq)
         if index < 1 or index > len(users):
             raise ValueError("角色记录不存在，请刷新后重试")
         record = users[index - 1]
@@ -974,7 +1010,7 @@ class SnailAdminPageService:
             )
 
         record["info"] = info
-        self._save_users(qq, data, users)
+        self._save_users(qq, data, users, revision)
         logger.info(
             "最强蜗牛管理页更新绑定：QQ %s，角色序号 %s，身份变更 %s",
             qq,
@@ -993,12 +1029,12 @@ class SnailAdminPageService:
         self._ensure_mutation_allowed()
         qq = _normalize_qq(payload.get("qq"))
         index = _as_int(payload.get("index"), -1)
-        data, users = self._load_users_for_update(qq)
+        data, users, revision = self._load_users_for_update(qq)
         if index < 1 or index > len(users):
             raise ValueError("角色记录不存在，请刷新后重试")
         users.pop(index - 1)
         if users:
-            self._save_users(qq, data, users)
+            self._save_users(qq, data, users, revision)
         else:
             self._remove_user_file(qq)
         logger.info("最强蜗牛管理页删除绑定：QQ %s，角色序号 %s", qq, index)
@@ -1045,20 +1081,40 @@ class SnailAdminPageService:
 
     def _load_users_for_update(
         self, qq: str, *, allow_missing: bool = False
-    ) -> tuple[dict[str, Any], list[Any]]:
+    ) -> tuple[dict[str, Any], list[Any], tuple[int, int] | None]:
+        revision = self.plugin._user_file_revision(qq)
         data = self.plugin._load_user_data(qq)
         if data is None:
             if not allow_missing:
                 raise ValueError("未找到该 QQ 的绑定数据")
-            return {"num": 0, "users": []}, []
+            return {"num": 0, "users": []}, [], revision
         if not isinstance(data, dict):
             raise ValueError("用户数据格式异常")
         users = data.get("users", [])
         if not isinstance(users, list):
             raise ValueError("用户角色列表格式异常")
-        return data, list(users)
+        return data, list(users), revision
 
-    def _save_users(self, qq: str, data: dict[str, Any], users: list[Any]) -> None:
+    def _save_users(
+        self,
+        qq: str,
+        data: dict[str, Any],
+        users: list[Any],
+        expected_revision: tuple[int, int] | None = None,
+    ) -> None:
+        """写回绑定数据，并在读改写期间文件被改动时拒绝覆盖。
+
+        Args:
+            qq: 用户 QQ。
+            data: 用户数据字典。
+            users: 角色列表。
+            expected_revision: 读取时记录的版本标记；不一致说明期间有其它写入。
+        Raises:
+            ValueError: 数据已被其他操作修改。
+            RuntimeError: 写入失败。
+        """
+        if self.plugin._user_file_revision(qq) != expected_revision:
+            raise ValueError("绑定数据已被其他操作修改，请刷新后重试")
         data["users"] = users
         data["num"] = len(users)
         if not self.plugin._save_user_data(qq, data):
@@ -1678,6 +1734,12 @@ class SnailAdminPageController:
                 "Import pending website binding requests",
             ),
             (
+                "/admin/strategy/service",
+                self.page_strategy_service,
+                ["POST"],
+                "Enable or disable the whole strategy service",
+            ),
+            (
                 "/admin/signin/sync",
                 self.page_signin_sync,
                 ["POST"],
@@ -1859,6 +1921,13 @@ class SnailAdminPageController:
 
     async def page_signin_sync(self):
         return await self.page_sync()
+
+    async def page_strategy_service(self):
+        payload = await self._json_body()
+        data = await asyncio.to_thread(
+            self.service.set_strategy_service_enabled, payload
+        )
+        return self._jsonify({"ok": True, "data": data})
 
     async def page_signin_gift_update(self):
         payload = await self._json_body()

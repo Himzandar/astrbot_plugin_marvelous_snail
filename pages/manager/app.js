@@ -91,6 +91,8 @@ const els = {
   strategyStatTargetsHint: document.getElementById("strategyStatTargetsHint"),
   strategyStatJob: document.getElementById("strategyStatJob"),
   strategyStatJobHint: document.getElementById("strategyStatJobHint"),
+  strategyServiceToggle: document.getElementById("strategyServiceToggle"),
+  strategyServiceHint: document.getElementById("strategyServiceHint"),
   strategyAuthorSummary: document.getElementById("strategyAuthorSummary"),
   strategyAuthorCount: document.getElementById("strategyAuthorCount"),
   strategyAuthorList: document.getElementById("strategyAuthorList"),
@@ -2148,6 +2150,10 @@ function renderSigninUnavailable() {
 }
 
 function renderStrategyUnavailable() {
+  if (els.strategyServiceToggle) {
+    els.strategyServiceToggle.disabled = true;
+  }
+  setText(els.strategyServiceHint, "暂时无法读取攻略服务开关状态");
   setText(els.strategyStatAuthors, "--");
   setText(els.strategyStatArticles, "--");
   setText(els.strategyStatTargets, "--");
@@ -2179,9 +2185,21 @@ function renderStrategy(strategy) {
     ? strategy.push_targets
     : [];
   const job = strategy.job || null;
+  const serviceEnabled = strategy.service_enabled !== false;
   const exporterConfigured = Boolean(strategy.exporter_configured);
   const jobRunning = Boolean(job && strategy.scheduler_running);
   const latestSync = Number(strategy.latest_cache_sync_at || 0);
+
+  if (els.strategyServiceToggle) {
+    els.strategyServiceToggle.checked = serviceEnabled;
+    els.strategyServiceToggle.disabled = false;
+  }
+  setText(
+    els.strategyServiceHint,
+    serviceEnabled
+      ? "关闭后「最强蜗牛」作者管理、搜索攻略、攻略推送与更新任务统一停用，机器人只回复暂停提示。"
+      : "已暂停：攻略相关指令统一回复暂停提示，攻略更新任务不会执行。重新开启后立即恢复。",
+  );
 
   setNumber(els.strategyStatAuthors, strategy.saved_author_count || authors.length);
   setText(
@@ -2203,25 +2221,39 @@ function renderStrategy(strategy) {
       : "尚未开启攻略推送",
   );
 
-  setText(els.strategyStatJob, jobRunning ? "运行中" : exporterConfigured ? "待启用" : "未配置");
+  setText(
+    els.strategyStatJob,
+    !serviceEnabled ? "已暂停" : jobRunning ? "运行中" : exporterConfigured ? "待启用" : "未配置",
+  );
   const nextRun = parseISOTime(job?.next_run_time);
   setText(
     els.strategyStatJobHint,
-    nextRun
-      ? `下次更新 ${formatRelative(nextRun)}`
-      : exporterConfigured
-        ? "已配置服务，但更新任务未注册"
-        : "需要配置 API 地址与认证密钥",
+    !serviceEnabled
+      ? "服务开关关闭，更新任务不会注册"
+      : nextRun
+        ? `下次更新 ${formatRelative(nextRun)}`
+        : exporterConfigured
+          ? "已配置服务，但更新任务未注册"
+          : "需要配置 API 地址与认证密钥",
   );
 
-  const ready = exporterConfigured && jobRunning;
+  const ready = serviceEnabled && exporterConfigured && jobRunning;
   els.strategyHealthPill.className = `health-pill ${ready ? "is-online" : "is-offline"}`;
   els.strategyHealthPill.replaceChildren(
     createElement("i"),
-    document.createTextNode(ready ? "运行中" : exporterConfigured ? "待启用" : "未配置"),
+    document.createTextNode(
+      !serviceEnabled
+        ? "已暂停"
+        : ready
+          ? "运行中"
+          : exporterConfigured
+            ? "待启用"
+            : "未配置",
+    ),
   );
 
   const checks = [
+    ["服务开关", serviceEnabled],
     ["攻略 API 地址", strategy.exporter_url_configured],
     ["API 认证密钥", strategy.exporter_key_configured],
     ["更新任务", Boolean(job)],
@@ -2635,6 +2667,22 @@ function bindEvents() {
   els.searchInput.addEventListener("input", () => {
     state.query = els.searchInput.value || "";
     renderUserList();
+  });
+
+  els.strategyServiceToggle?.addEventListener("change", async (event) => {
+    const target = event.target;
+    const enabled = Boolean(target.checked);
+    target.disabled = true;
+    try {
+      await apiPost("admin/strategy/service", { enabled });
+      showToast(enabled ? "攻略服务已开启" : "攻略服务已暂停");
+      await loadBootstrap();
+    } catch (error) {
+      target.checked = !enabled;
+      showToast(error instanceof Error ? error.message : "切换攻略服务失败", "error");
+    } finally {
+      target.disabled = false;
+    }
   });
 
   els.userList.addEventListener("click", (event) => {

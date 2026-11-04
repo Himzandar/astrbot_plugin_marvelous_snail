@@ -7,7 +7,7 @@
     <meta name="theme-color" content="#0f172a" />
     <title>最强蜗牛管理</title>
     <link rel="icon" href="data:," />
-    <link rel="stylesheet" href="./styles.css?v=1.16.3" />
+    <link rel="stylesheet" href="./styles.css?v=1.16.5" />
   </head>
   <body>
     <div class="ambient ambient-one" aria-hidden="true"></div>
@@ -328,6 +328,17 @@
         </div>
 
         <div class="service-view" id="strategyView" role="tabpanel" aria-labelledby="strategyTab" data-service-view="strategy" hidden>
+          <section class="panel strategy-service-panel" aria-label="攻略服务开关">
+            <div class="setting-toggle-list">
+              <label class="setting-toggle" for="strategyServiceToggle">
+                <span class="setting-toggle-copy">
+                  <strong>启用攻略服务</strong>
+                  <small id="strategyServiceHint">关闭后「最强蜗牛」作者管理、搜索攻略、攻略推送与更新任务统一停用，机器人只回复暂停提示。</small>
+                </span>
+                <input id="strategyServiceToggle" type="checkbox" />
+              </label>
+            </div>
+          </section>
           <section class="stats-grid strategy-stats-grid" aria-label="攻略服务数据概览">
             <article class="stat-card">
               <div class="stat-label-row">
@@ -634,7 +645,7 @@
     </section>
 
     <div class="toast-layer" id="toastLayer" aria-live="polite" aria-atomic="true"></div>
-    <script type="module" src="./app.js?v=1.16.3"></script>
+    <script type="module" src="./app.js?v=1.16.5"></script>
   </body>
 </html>
 

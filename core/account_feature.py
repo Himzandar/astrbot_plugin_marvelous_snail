@@ -424,6 +424,7 @@ class AccountFeatureMixin(AccountFeatureBase):
         total_uid_count = 0
         success_count = 0
         failed_count = 0
+        storage_error = False
         success_lines: list[str] = []
         failed_lines: list[str] = []
         await event.send(event.plain_result("⏳ 正在执行批量绑定,请稍候..."))
@@ -562,6 +563,12 @@ class AccountFeatureMixin(AccountFeatureBase):
                     self._set_bound_game_id(user_record, selected_game_id)
                     users.append(user_record)
 
+                    # 每条成功即落盘：整批结束才写一次的话，中途异常或插件重载
+                    # 会让已经提示“绑定成功”的角色在本地零记录。
+                    if not self._append_user_record(sender_id, user_record):
+                        storage_error = True
+                        logger.error(f"批量绑定写回本地失败: {selected_info}")
+
                     success_count += 1
                     gift_prefix = "✅" if gift_summary["success_count"] > 0 else "ℹ️"
                     success_lines.append(
@@ -577,10 +584,6 @@ class AccountFeatureMixin(AccountFeatureBase):
                         )
                     )
                     await asyncio.sleep(max(3, random.uniform(3, 15)))
-        storage_error = bool(
-            users
-            and not self._save_user_data(sender_id, {"num": len(users), "users": users})
-        )
 
         if binding_paused:
             failed_lines.append(f"- {binding_paused.replace(chr(10), ' ')}")
@@ -643,69 +646,77 @@ class AccountFeatureMixin(AccountFeatureBase):
         if not user_file.exists():
             await event.send(event.plain_result("❌ 未找到绑定数据"))
             return
+
         try:
-            with user_file.open("r", encoding="utf-8") as f:
-                user_data = json.load(f)
-                users = user_data.get("users", [])
-                if not users or len(users) == 0:
-                    await event.send(event.plain_result("❌ 未找到绑定数据"))
-                    return
-                select_info = "选择需要删除的账号:\n回复 退出 或 取消 可结束当前流程。"
-                index = 1
-                for user in users:
-                    select_info += f"\n{index}. {user['info']}"
-                    index += 1
-                message_id = await send_msg(event, select_info)
-
-                @session_waiter(timeout=20)
-                async def delete_waiter(
-                    controller: SessionController, event: AstrMessageEvent
-                ):
-                    nonlocal message_id, users, user_file, user_id
-                    now_user_id = event.get_sender_id().replace("/", "_")
-                    if now_user_id != user_id:
-                        return
-                    arg = event.message_str.strip()
-                    parts = arg.split()
-                    if len(parts) == 0:
-                        return
-                    if self._is_exit_command(arg):
-                        await event.send(event.plain_result("✅ 已退出注销流程"))
-                        controller.stop()
-                        return
-                    if isinstance(event, AiocqhttpMessageEvent):
-                        if message_id:
-                            await event.bot.delete_msg(message_id=message_id)
-                            message_id = None
-                    if len(parts) == 1 and parts[0].isdigit():
-                        select_index = int(parts[0])
-                        if select_index < 1 or select_index > len(users):
-                            return
-                        selected_user = users[select_index - 1]
-                        users.remove(selected_user)
-                        if users:
-                            user_data["users"] = users
-                            user_data["num"] = len(users)
-                            if not self._save_user_data(user_id, user_data):
-                                raise RuntimeError("保存删除结果失败")
-                        else:
-                            user_file.unlink(missing_ok=True)
-                        logger.info(
-                            f"用户 {user_id} 已删除一个绑定角色，剩余 {len(users)} 个"
-                        )
-                        await event.send(event.plain_result("✅ 账号删除成功"))
-                        controller.stop()
-                        return
-
-                try:
-                    await delete_waiter(event)
-                    event.stop_event()
-                except TimeoutError:
-                    logger.warning("选择超时！")
-                    await event.send(event.plain_result("❌ 选择超时，终止运行"))
+            with user_file.open("r", encoding="utf-8") as handle:
+                user_data = json.load(handle)
         except Exception as e:
-            logger.error(f"读取用户数据失败: {e}")
-            await event.send(event.plain_result("❌ 读取数据失败"))
+            logger.error(f"读取用户 {user_id} 的绑定数据失败: {e}")
+            await event.send(event.plain_result("❌ 读取数据失败，请稍后重试"))
+            return
+
+        users = user_data.get("users", []) if isinstance(user_data, dict) else []
+        if not isinstance(users, list) or not users:
+            await event.send(event.plain_result("❌ 未找到绑定数据"))
+            return
+
+        select_info = "选择需要删除的账号:\n回复 退出 或 取消 可结束当前流程。"
+        for index, user in enumerate(users, start=1):
+            info = (
+                user.get("info", "未知角色") if isinstance(user, dict) else "未知角色"
+            )
+            select_info += f"\n{index}. {info}"
+        message_id = await send_msg(event, select_info)
+
+        @session_waiter(timeout=20)
+        async def delete_waiter(controller: SessionController, event: AstrMessageEvent):
+            nonlocal message_id, users, user_id
+            now_user_id = event.get_sender_id().replace("/", "_")
+            if now_user_id != user_id:
+                return
+            arg = event.message_str.strip()
+            parts = arg.split()
+            if len(parts) == 0:
+                return
+            if self._is_exit_command(arg):
+                await event.send(event.plain_result("✅ 已退出注销流程"))
+                controller.stop()
+                return
+            if isinstance(event, AiocqhttpMessageEvent):
+                if message_id:
+                    await event.bot.delete_msg(message_id=message_id)
+                    message_id = None
+            if len(parts) == 1 and parts[0].isdigit():
+                select_index = int(parts[0])
+                if select_index < 1 or select_index > len(users):
+                    return
+                del users[select_index - 1]
+                if users:
+                    if not self._save_user_data(
+                        user_id, {"num": len(users), "users": users}
+                    ):
+                        logger.error(f"用户 {user_id} 保存删除结果失败")
+                        await event.send(
+                            event.plain_result("❌ 保存删除结果失败，请联系管理员")
+                        )
+                        controller.stop()
+                        return
+                else:
+                    user_file.unlink(missing_ok=True)
+                logger.info(f"用户 {user_id} 已删除一个绑定角色，剩余 {len(users)} 个")
+                await event.send(event.plain_result("✅ 账号删除成功"))
+                controller.stop()
+                return
+
+        try:
+            await delete_waiter(event)
+            event.stop_event()
+        except TimeoutError:
+            logger.warning("选择超时！")
+            await event.send(event.plain_result("❌ 选择超时，终止运行"))
+        except (OSError, RuntimeError, TypeError, ValueError) as e:
+            logger.error(f"用户 {user_id} 注销流程异常: {e}")
+            await event.send(event.plain_result("❌ 操作失败，请稍后重试"))
 
     async def schedule_sign_impl(self, event: AstrMessageEvent, enabled: str):
         """处理定时签到推送的请求，根据用户输入开启或关闭定时签到推送功能。
@@ -928,6 +939,7 @@ class AccountFeatureMixin(AccountFeatureBase):
                             )
                         )
                         continue
+                    user_revision = self._user_file_revision(user_id)
                     users = self._load_task_users(user_file, user_id, "定时签到")
                     if users is None:
                         failed_user_count += 1
@@ -1234,7 +1246,9 @@ class AccountFeatureMixin(AccountFeatureBase):
                 writer = {"num": 0, "users": writer_data}
                 writer["num"] = len(writer_data)
                 try:
-                    if not self._save_user_data(user_id, writer):
+                    if not self._save_user_data_snapshot(
+                        user_id, user_revision, writer_data
+                    ):
                         raise RuntimeError("写入用户数据失败")
                 except Exception as e:
                     logger.error(f"写回用户 {user_id} 的签到数据失败: {e}")
